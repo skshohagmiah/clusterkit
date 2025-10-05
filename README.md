@@ -824,5 +824,6 @@ Apache License 2.0
 
 ---
 
-**ClusterKit — Embed clustering into your Go applications with ease**#   c l u s t e r k i t  
+**ClusterKit — Embed clustering into your Go applications with ease**#   c l u s t e r k i t 
+ 
  
