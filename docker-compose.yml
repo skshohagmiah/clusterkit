@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.10
+    container_name: clusterkit-etcd
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    environment:
+      - ETCD_DATA_DIR=/etcd-data
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_CLUSTER=default=http://0.0.0.0:2380
+      - ETCD_INITIAL_CLUSTER_TOKEN=tkn
+      - ETCD_INITIAL_CLUSTER_STATE=new
+    volumes:
+      - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Example KV store nodes
+  kv-node-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.kv
+    container_name: clusterkit-kv-1
+    ports:
+      - "8081:8080"
+      - "9001:9000"
+    environment:
+      - NODE_ID=kv-node-1
+      - ADVERTISE_ADDR=kv-node-1:9000
+      - HTTP_PORT=8080
+      - GRPC_PORT=9000
+      - ETCD_ENDPOINTS=http://etcd:2379
+    depends_on:
+      etcd:
+        condition: service_healthy
+
+  kv-node-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.kv
+    container_name: clusterkit-kv-2
+    ports:
+      - "8082:8080"
+      - "9002:9000"
+    environment:
+      - NODE_ID=kv-node-2
+      - ADVERTISE_ADDR=kv-node-2:9000
+      - HTTP_PORT=8080
+      - GRPC_PORT=9000
+      - ETCD_ENDPOINTS=http://etcd:2379
+    depends_on:
+      etcd:
+        condition: service_healthy
+
+  kv-node-3:
+    build:
+      context: .
+      dockerfile: Dockerfile.kv
+    container_name: clusterkit-kv-3
+    ports:
+      - "8083:8080"
+      - "9003:9000"
+    environment:
+      - NODE_ID=kv-node-3
+      - ADVERTISE_ADDR=kv-node-3:9000
+      - HTTP_PORT=8080
+      - GRPC_PORT=9000
+      - ETCD_ENDPOINTS=http://etcd:2379
+    depends_on:
+      etcd:
+        condition: service_healthy
+
+volumes:
+  etcd-data:

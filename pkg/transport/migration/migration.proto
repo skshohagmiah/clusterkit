@@ -1,0 +1,166 @@
+syntax = "proto3";
+
+package migration;
+
+option go_package = "github.com/shohag/clusterkit/pkg/transport/migration";
+
+// MigrationService handles partition data migration
+service MigrationService {
+  // StreamPartition streams all data for a partition
+  rpc StreamPartition(StreamRequest) returns (stream KeyValue);
+  
+  // ReceivePartition receives streamed data for a partition
+  rpc ReceivePartition(stream KeyValue) returns (MigrationResponse);
+  
+  // GetPartitionSize returns the size of a partition
+  rpc GetPartitionSize(PartitionSizeRequest) returns (PartitionSizeResponse);
+  
+  // CheckMigrationStatus checks the status of a migration
+  rpc CheckMigrationStatus(MigrationStatusRequest) returns (MigrationStatusResponse);
+}
+
+// ClusterService provides cluster information and operations
+service ClusterService {
+  // GetNodes returns all cluster nodes
+  rpc GetNodes(GetNodesRequest) returns (GetNodesResponse);
+  
+  // GetPartitionMap returns partition assignments
+  rpc GetPartitionMap(GetPartitionMapRequest) returns (GetPartitionMapResponse);
+  
+  // GetStats returns cluster statistics
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+  
+  // GetPartition returns partition for a key
+  rpc GetPartition(GetPartitionRequest) returns (GetPartitionResponse);
+  
+  // GetLeader returns leader for a partition
+  rpc GetLeader(GetLeaderRequest) returns (GetLeaderResponse);
+  
+  // GetReplicas returns replicas for a partition
+  rpc GetReplicas(GetReplicasRequest) returns (GetReplicasResponse);
+  
+  // Health check
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+// Messages for migration
+message StreamRequest {
+  int32 partition = 1;
+  int64 start_offset = 2;
+  int32 batch_size = 3;
+}
+
+message KeyValue {
+  string key = 1;
+  bytes value = 2;
+  int64 timestamp = 3;
+  int32 partition = 4;
+}
+
+message MigrationResponse {
+  bool success = 1;
+  string error = 2;
+  int32 keys_received = 3;
+}
+
+message PartitionSizeRequest {
+  int32 partition = 1;
+}
+
+message PartitionSizeResponse {
+  int32 partition = 1;
+  int64 size_bytes = 2;
+  int32 key_count = 3;
+}
+
+message MigrationStatusRequest {
+  string migration_id = 1;
+}
+
+message MigrationStatusResponse {
+  string migration_id = 1;
+  string status = 2;
+  float progress = 3;
+  string error = 4;
+}
+
+// Messages for cluster operations
+message GetNodesRequest {
+}
+
+message GetNodesResponse {
+  repeated Node nodes = 1;
+  int32 count = 2;
+}
+
+message GetPartitionMapRequest {
+}
+
+message GetPartitionMapResponse {
+  map<int32, PartitionInfo> partitions = 1;
+  int32 count = 2;
+}
+
+message GetStatsRequest {
+}
+
+message GetStatsResponse {
+  int32 node_count = 1;
+  int32 partition_count = 2;
+  int32 local_partitions = 3;
+  int32 leader_partitions = 4;
+  int32 replica_factor = 5;
+}
+
+message GetPartitionRequest {
+  string key = 1;
+}
+
+message GetPartitionResponse {
+  string key = 1;
+  int32 partition = 2;
+}
+
+message GetLeaderRequest {
+  int32 partition = 1;
+}
+
+message GetLeaderResponse {
+  int32 partition = 1;
+  Node leader = 2;
+}
+
+message GetReplicasRequest {
+  int32 partition = 1;
+}
+
+message GetReplicasResponse {
+  int32 partition = 1;
+  repeated Node replicas = 2;
+  int32 count = 3;
+}
+
+message HealthRequest {
+}
+
+message HealthResponse {
+  string status = 1;
+  bool healthy = 2;
+  string node_id = 3;
+}
+
+// Common types
+message Node {
+  string id = 1;
+  string addr = 2;
+  string http_endpoint = 3;
+  string grpc_endpoint = 4;
+  map<string, string> metadata = 5;
+  int64 last_heartbeat = 6;
+}
+
+message PartitionInfo {
+  int32 id = 1;
+  Node leader = 2;
+  repeated Node replicas = 3;
+}
