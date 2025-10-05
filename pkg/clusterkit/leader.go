@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/shohag/clusterkit/pkg/etcd"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 // LeaderElection manages leader election for partitions

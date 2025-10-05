@@ -23,8 +23,14 @@ type WatchEvent struct {
 	Type     WatchEventType
 	Key      string
 	Value    []byte
-	PrevKv   *clientv3.KeyValue
+	PrevKv   *KeyValue
 	Revision int64
+}
+
+// KeyValue represents a key-value pair (to avoid etcd dependency in interface)
+type KeyValue struct {
+	Key   []byte
+	Value []byte
 }
 
 // WatchHandler is a function that handles watch events

@@ -2,33 +2,32 @@
 
 **Distributed Clustering Made Simple**
 
-A lightweight, embeddable clustering library for Go that provides automatic node membership, partitioning, replication management, and leader routing — all built on top of etcd.
-
 Build scalable distributed systems like databases, caches, message brokers, or stream processors by simply embedding ClusterKit into your application.
 
 ---
 
 ## 📋 Table of Contents
 
-- [Overview](#-overview)
-- [Features](#-features)
-- [Architecture](#%EF%B8%8F-architecture)
-- [Installation](#-installation)
-- [Quick Start](#-quick-start)
-- [API Reference](#-api-reference)
-- [Hooks & Lifecycle](#-hooks--lifecycle)
-- [Communication](#-communication)
-- [Project Structure](#-project-structure)
-- [Configuration](#%EF%B8%8F-configuration)
-- [Examples](#-examples)
-- [Best Practices](#-best-practices)
-- [Observability](#-observability)
-- [Troubleshooting](#-troubleshooting)
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [API Reference](#api-reference)
+- [Hooks & Lifecycle](#hooks--lifecycle)
+- [Communication](#communication)
+- [Project Structure](#project-structure)
+- [Configuration](#configuration)
+- [Examples](#examples)
+- [Best Practices](#best-practices)
+- [Observability](#observability)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
 ## 🚀 Overview
 
+{{ ... }}
 ClusterKit is an **embeddable library**, not a standalone service. You import it into your Go application and it handles all the clustering complexity.
 
 ### What ClusterKit Does
@@ -824,5 +823,6 @@ Apache License 2.0
 
 ---
 
-**ClusterKit — Embed clustering into your Go applications with ease**#   c l u s t e r k i t  
+**ClusterKit — Embed clustering into your Go applications with ease**#   c l u s t e r k i t 
+ 
  

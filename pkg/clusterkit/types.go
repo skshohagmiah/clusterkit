@@ -34,20 +34,27 @@ type Config struct {
 	// Ports
 	HTTPPort int `json:"http_port"`
 	GRPCPort int `json:"grpc_port"`
-
+	
 	// Cluster
 	Partitions    int `json:"partitions"`
 	ReplicaFactor int `json:"replica_factor"`
 
-	// etcd
-	EtcdEndpoints []string `json:"etcd_endpoints"`
-	EtcdPrefix    string   `json:"etcd_prefix"`
+	// etcd configuration
+	EtcdEndpoints []string      `json:"etcd_endpoints"`
+	EtcdPrefix    string        `json:"etcd_prefix"`
+	EtcdTimeout   time.Duration `json:"etcd_timeout"`
+
+	// Resilience configuration
+	EtcdRetryAttempts    int           `json:"etcd_retry_attempts"`
+	EtcdRetryDelay       time.Duration `json:"etcd_retry_delay"`
+	EtcdMaxRetryDelay    time.Duration `json:"etcd_max_retry_delay"`
+	DegradedModeEnabled  bool          `json:"degraded_mode_enabled"`
+	DegradedModeTimeout  time.Duration `json:"degraded_mode_timeout"`
 
 	// Timeouts
 	HeartbeatInterval time.Duration `json:"heartbeat_interval"`
 	SessionTTL        time.Duration `json:"session_ttl"`
 	RebalanceDelay    time.Duration `json:"rebalance_delay"`
-
 	// Hooks
 	OnPartitionAssigned   func(partition int, previousOwner *Node)
 	OnPartitionUnassigned func(partition int, newOwner *Node)
