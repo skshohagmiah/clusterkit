@@ -1,0 +1,333 @@
+package clusterkit
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+)
+
+// StateUpdate represents a state update message
+type StateUpdate struct {
+	Node      Node      `json:"node"`
+	Cluster   *Cluster  `json:"cluster"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// startHTTPServer starts the HTTP server for inter-node communication
+func (ck *ClusterKit) startHTTPServer() error {
+	mux := http.NewServeMux()
+
+	// Health check endpoint
+	mux.HandleFunc("/health", ck.handleHealth)
+
+	// Node registration endpoint
+	mux.HandleFunc("/join", ck.handleJoin)
+	
+	// State synchronization endpoint
+	mux.HandleFunc("/sync", ck.handleSync)
+
+	// Partition endpoints
+	mux.HandleFunc("/partitions", ck.handleGetPartitions)
+	mux.HandleFunc("/partitions/stats", ck.handleGetPartitionStats)
+	mux.HandleFunc("/partitions/key", ck.handleGetPartitionForKey)
+
+	// Consensus endpoints
+	mux.HandleFunc("/consensus/leader", ck.handleGetLeader)
+	mux.HandleFunc("/consensus/stats", ck.handleGetConsensusStats)
+
+	server := &http.Server{
+		Addr:    ck.httpAddr,
+		Handler: mux,
+	}
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("HTTP server error: %v\n", err)
+		}
+	}()
+
+	return nil
+}
+
+// handleHealth responds to health check requests
+func (ck *ClusterKit) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(Result{
+		Success: true,
+		Message: "healthy",
+	})
+}
+
+// handleJoin handles node join requests
+func (ck *ClusterKit) handleJoin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var joinReq struct {
+		Node     Node   `json:"node"`
+		RaftAddr string `json:"raft_addr"`
+	}
+	
+	if err := json.NewDecoder(r.Body).Decode(&joinReq); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	node := joinReq.Node
+	fmt.Printf("Received join request from %s (%s)\n", node.Name, node.ID)
+
+	// Only leader can add nodes to Raft
+	cm := ck.consensusManager
+	if !cm.IsLeader() {
+		http.Error(w, "not the leader", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Add node to Raft cluster
+	if err := cm.AddVoter(node.ID, joinReq.RaftAddr); err != nil {
+		fmt.Printf("Failed to add voter to Raft: %v\n", err)
+		http.Error(w, fmt.Sprintf("failed to add to raft: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Propose node addition through Raft consensus
+	if err := cm.ProposeAction("add_node", map[string]interface{}{
+		"id":     node.ID,
+		"name":   node.Name,
+		"ip":     node.IP,
+		"status": node.Status,
+	}); err != nil {
+		http.Error(w, fmt.Sprintf("failed to propose: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Printf("✓ Node %s added to cluster\n", node.Name)
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(Result{
+		Success: true,
+		Message: "Node joined successfully",
+		Data:    ck.cluster,
+	})
+}
+
+// handleSync handles state synchronization requests
+func (ck *ClusterKit) handleSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var update StateUpdate
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	ck.mu.Lock()
+	// Merge nodes from incoming state
+	for _, incomingNode := range update.Cluster.Nodes {
+		found := false
+		for i, existingNode := range ck.cluster.Nodes {
+			if existingNode.ID == incomingNode.ID {
+				ck.cluster.Nodes[i] = incomingNode
+				found = true
+				break
+			}
+		}
+		if !found {
+			ck.cluster.Nodes = append(ck.cluster.Nodes, incomingNode)
+		}
+	}
+	ck.mu.Unlock()
+
+	// Save updated state
+	ck.saveState()
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(Result{
+		Success: true,
+		Message: "State synced successfully",
+	})
+}
+
+// handleGetCluster returns the current cluster state
+func (ck *ClusterKit) handleGetCluster(w http.ResponseWriter, r *http.Request) {
+	ck.mu.RLock()
+	cluster := ck.cluster
+	ck.mu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(cluster)
+}
+
+// handleGetPartitions returns all partitions
+func (ck *ClusterKit) handleGetPartitions(w http.ResponseWriter, r *http.Request) {
+	partitions := ck.ListPartitions()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"partitions": partitions,
+		"count":      len(partitions),
+	})
+}
+
+// handleGetPartitionStats returns partition statistics
+func (ck *ClusterKit) handleGetPartitionStats(w http.ResponseWriter, r *http.Request) {
+	stats := ck.GetPartitionStats()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+// handleGetPartitionForKey returns the partition for a given key
+func (ck *ClusterKit) handleGetPartitionForKey(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		http.Error(w, "key parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	partition, err := ck.GetPartitionForKey(key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(partition)
+}
+
+// handleGetLeader returns the current leader information
+func (ck *ClusterKit) handleGetLeader(w http.ResponseWriter, r *http.Request) {
+	leader, err := ck.consensusManager.GetLeader()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(leader)
+}
+
+// handleGetConsensusStats returns consensus statistics
+func (ck *ClusterKit) handleGetConsensusStats(w http.ResponseWriter, r *http.Request) {
+	stats := ck.consensusManager.GetStats()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+// syncWithNode synchronizes state with a specific node
+func (ck *ClusterKit) syncWithNode(node Node) error {
+	ck.mu.RLock()
+	update := StateUpdate{
+		Node: Node{
+			ID:     ck.cluster.ID,
+			Name:   ck.cluster.Name,
+			IP:     ck.httpAddr,
+			Status: "active",
+		},
+		Cluster:   ck.cluster,
+		Timestamp: time.Now(),
+	}
+	ck.mu.RUnlock()
+
+	data, err := json.Marshal(update)
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("http://%s/sync", node.IP)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("sync failed with status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// joinNode attempts to join a node at the given address
+func (ck *ClusterKit) joinNode(nodeAddr string) error {
+	// Get self node info (first node in cluster is always self)
+	var nodeName string
+	if len(ck.cluster.Nodes) > 0 {
+		nodeName = ck.cluster.Nodes[0].Name
+	} else {
+		nodeName = ck.cluster.ID
+	}
+	
+	selfNode := Node{
+		ID:     ck.cluster.ID,
+		Name:   nodeName,
+		IP:     ck.httpAddr,
+		Status: "active",
+	}
+
+	joinReq := map[string]interface{}{
+		"node":      selfNode,
+		"raft_addr": ck.consensusManager.raftBind,
+	}
+
+	data, err := json.Marshal(joinReq)
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("http://%s/join", nodeAddr)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("join failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result Result
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+
+	// Update local state with cluster info from the joined node
+	if clusterData, ok := result.Data.(map[string]interface{}); ok {
+		ck.mu.Lock()
+		if nodes, ok := clusterData["nodes"].([]interface{}); ok {
+			for _, n := range nodes {
+				if nodeMap, ok := n.(map[string]interface{}); ok {
+					node := Node{
+						ID:     nodeMap["id"].(string),
+						Name:   nodeMap["name"].(string),
+						IP:     nodeMap["ip"].(string),
+						Status: nodeMap["status"].(string),
+					}
+
+					// Add if not exists
+					exists := false
+					for _, existing := range ck.cluster.Nodes {
+						if existing.ID == node.ID {
+							exists = true
+							break
+						}
+					}
+					if !exists {
+						ck.cluster.Nodes = append(ck.cluster.Nodes, node)
+					}
+				}
+			}
+		}
+		ck.mu.Unlock()
+		ck.saveState()
+	}
+
+	return nil
+}
