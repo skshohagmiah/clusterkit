@@ -1,0 +1,28 @@
+# Git
+.git
+.gitignore
+
+# Data directories
+data/
+*/data/
+
+# Documentation
+*.md
+!README.md
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+*_test.go
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib

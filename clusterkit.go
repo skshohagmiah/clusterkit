@@ -120,6 +120,22 @@ func (ck *ClusterKit) Start() error {
 	// Start periodic state sync
 	go ck.syncLoop()
 
+	// Auto-create partitions if bootstrap node and no partitions exist
+	if ck.consensusManager.isBootstrap {
+		go func() {
+			// Wait for leader election
+			time.Sleep(2 * time.Second)
+			if ck.consensusManager.IsLeader() && len(ck.cluster.PartitionMap.Partitions) == 0 {
+				fmt.Println("Auto-creating partitions...")
+				if err := ck.CreatePartitions(); err != nil {
+					fmt.Printf("Failed to auto-create partitions: %v\n", err)
+				} else {
+					fmt.Printf("✓ Created %d partitions automatically\n", ck.cluster.Config.PartitionCount)
+				}
+			}
+		}()
+	}
+
 	fmt.Printf("ClusterKit started on %s\n", ck.httpAddr)
 	return nil
 }
