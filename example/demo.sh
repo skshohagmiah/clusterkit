@@ -71,38 +71,91 @@ NODE_ID=node-3 JOIN_ADDR=localhost:8080 go run main.go > /tmp/node3.log 2>&1 &
 NODE3_PID=$!
 
 print_info "Waiting for compilation and cluster formation..."
-sleep 20
 
-# Verify cluster formation
-CLUSTER=$(timeout 5 curl -s http://localhost:8080/cluster 2>/dev/null || echo '{"error":"timeout"}')
-if echo "$CLUSTER" | grep -q "error"; then
-    print_error "Cluster not responding. Check logs at /tmp/node*.log"
+# Wait for port 8080 to be listening (with timeout)
+MAX_WAIT=60
+ELAPSED=0
+while [ $ELAPSED -lt $MAX_WAIT ]; do
+    if lsof -i :8080 >/dev/null 2>&1; then
+        break
+    fi
+    echo -n "."
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+done
+echo ""
+
+if [ $ELAPSED -ge $MAX_WAIT ]; then
+    print_error "Node 1 failed to start after ${MAX_WAIT}s. Check logs at /tmp/node1.log"
+    echo ""
+    echo "Recent logs from node1:"
+    tail -30 /tmp/node1.log
     exit 1
 fi
 
-NODE_COUNT=$(echo "$CLUSTER" | grep -o '"id":"node-[0-9]"' | wc -l)
-if [ "$NODE_COUNT" -eq 3 ]; then
-    print_success "Cluster formed with 3 nodes"
-else
-    print_error "Expected 3 nodes, found $NODE_COUNT"
+print_info "Node 1 HTTP server is up, waiting for all nodes to join..."
+
+# Wait for all 3 nodes to join the cluster
+MAX_RETRIES=15
+RETRY_DELAY=2
+NODE_COUNT=0
+
+for i in $(seq 1 $MAX_RETRIES); do
+    CLUSTER=$(curl -s --max-time 3 http://localhost:8080/cluster 2>/dev/null || echo '{"error":"timeout"}')
+    
+    if ! echo "$CLUSTER" | grep -q "error"; then
+        NODE_COUNT=$(echo "$CLUSTER" | grep -o '"id":"node-[0-9]"' | wc -l | tr -d ' ')
+        
+        if [ "$NODE_COUNT" -eq 3 ]; then
+            echo ""
+            print_success "Cluster formed with 3 nodes"
+            break
+        fi
+    fi
+    
+    if [ $i -lt $MAX_RETRIES ]; then
+        echo -n "."
+        sleep $RETRY_DELAY
+    fi
+done
+
+if [ "$NODE_COUNT" -ne 3 ]; then
+    echo ""
+    print_error "Expected 3 nodes, found $NODE_COUNT after $((MAX_RETRIES * RETRY_DELAY))s"
+    echo ""
+    echo "Recent logs from node1:"
+    tail -30 /tmp/node1.log
+    echo ""
+    echo "Recent logs from node2:"
+    tail -20 /tmp/node2.log
+    echo ""
+    echo "Recent logs from node3:"
+    tail -20 /tmp/node3.log
     exit 1
 fi
 
-# Check partitions
-PART_STATS=$(timeout 5 curl -s http://localhost:8080/partitions/stats 2>/dev/null || echo '{"total_partitions":0}')
-TOTAL_PARTS=$(echo "$PART_STATS" | grep -o '"total_partitions":[0-9]*' | cut -d: -f2)
-
-if [ -z "$TOTAL_PARTS" ] || [ "$TOTAL_PARTS" -eq 0 ]; then
-    print_info "Partitions not created yet. Waiting..."
-    sleep 10
-    PART_STATS=$(timeout 5 curl -s http://localhost:8080/partitions/stats 2>/dev/null || echo '{"total_partitions":0}')
+# Check partitions with retry
+print_info "Checking partition creation..."
+TOTAL_PARTS=0
+for i in {1..8}; do
+    PART_STATS=$(curl -s --max-time 3 http://localhost:8080/partitions/stats 2>/dev/null || echo '{"total_partitions":0}')
     TOTAL_PARTS=$(echo "$PART_STATS" | grep -o '"total_partitions":[0-9]*' | cut -d: -f2)
-fi
+    
+    if [ -n "$TOTAL_PARTS" ] && [ "$TOTAL_PARTS" -eq 16 ]; then
+        break
+    fi
+    
+    if [ $i -lt 8 ]; then
+        echo -n "."
+        sleep 2
+    fi
+done
+echo ""
 
 if [ "$TOTAL_PARTS" -eq 16 ]; then
     print_success "16 partitions created and distributed"
 else
-    print_error "Expected 16 partitions, found $TOTAL_PARTS"
+    print_error "Expected 16 partitions, found ${TOTAL_PARTS:-0}"
 fi
 
 # Check hash function sync
@@ -124,7 +177,7 @@ PORTS=(9080 9081 9082)  # Rotate between all 3 nodes
 for i in {1..20}; do
     # Round-robin across nodes
     PORT=${PORTS[$((i % 3))]}
-    if timeout 3 curl -s -X POST http://localhost:$PORT/kv/set \
+    if curl -s --max-time 3 -X POST http://localhost:$PORT/kv/set \
         -H "Content-Type: application/json" \
         -d "{\"key\":\"user-$i\",\"value\":\"User $i\"}" > /dev/null 2>&1; then
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
@@ -144,9 +197,9 @@ fi
 sleep 2
 
 # Check distribution
-NODE1=$(timeout 3 curl -s http://localhost:9080/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
-NODE2=$(timeout 3 curl -s http://localhost:9081/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
-NODE3=$(timeout 3 curl -s http://localhost:9082/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
+NODE1=$(curl -s --max-time 3 http://localhost:9080/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
+NODE2=$(curl -s --max-time 3 http://localhost:9081/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
+NODE3=$(curl -s --max-time 3 http://localhost:9082/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
 
 COUNT1=$(echo "$NODE1" | grep -o '"count":[0-9]*' | cut -d: -f2)
 COUNT2=$(echo "$NODE2" | grep -o '"count":[0-9]*' | cut -d: -f2)
@@ -204,7 +257,7 @@ sleep 3
 
 # Verify cluster still works
 print_info "Testing cluster with 2 nodes..."
-RESULT=$(timeout 3 curl -s -X POST http://localhost:9080/kv/set \
+RESULT=$(curl -s --max-time 3 -X POST http://localhost:9080/kv/set \
     -H "Content-Type: application/json" \
     -d '{"key":"test-after-failure","value":"Still works!"}' 2>/dev/null)
 
@@ -229,7 +282,7 @@ NODE2_PID=$!
 sleep 10
 
 # Verify node rejoined
-CLUSTER=$(timeout 5 curl -s http://localhost:8080/cluster 2>/dev/null || echo '{"error":"timeout"}')
+CLUSTER=$(curl -s --max-time 5 http://localhost:8080/cluster 2>/dev/null || echo '{"error":"timeout"}')
 NODE_COUNT=$(echo "$CLUSTER" | grep -o '"id":"node-[0-9]"' | wc -l)
 if [ "$NODE_COUNT" -eq 3 ]; then
     print_success "Node 2 rejoined cluster"
@@ -249,7 +302,7 @@ NODE4_PID=$!
 sleep 15
 
 # Check if node joined
-CLUSTER=$(timeout 5 curl -s http://localhost:8080/cluster 2>/dev/null || echo '{"error":"timeout"}')
+CLUSTER=$(curl -s --max-time 5 http://localhost:8080/cluster 2>/dev/null || echo '{"error":"timeout"}')
 NODE_COUNT=$(echo "$CLUSTER" | grep -o '"id":"node-[0-9]"' | wc -l)
 if [ "$NODE_COUNT" -eq 4 ]; then
     print_success "Node 4 joined - now 4 nodes in cluster"
@@ -262,7 +315,7 @@ print_info "Waiting for partition migration and data replication (30s)..."
 sleep 30
 
 # Check if data migrated to new node
-NODE4=$(timeout 3 curl -s http://localhost:9083/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
+NODE4=$(curl -s --max-time 3 http://localhost:9083/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
 COUNT4=$(echo "$NODE4" | grep -o '"count":[0-9]*' | cut -d: -f2)
 
 if [ "$COUNT4" -gt 0 ]; then
@@ -283,9 +336,9 @@ fi
 # Show final distribution across all 4 nodes
 echo ""
 print_info "Final distribution across 4 nodes:"
-NODE1=$(timeout 3 curl -s http://localhost:9080/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
-NODE2=$(timeout 3 curl -s http://localhost:9081/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
-NODE3=$(timeout 3 curl -s http://localhost:9082/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
+NODE1=$(curl -s --max-time 3 http://localhost:9080/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
+NODE2=$(curl -s --max-time 3 http://localhost:9081/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
+NODE3=$(curl -s --max-time 3 http://localhost:9082/kv/list 2>/dev/null || echo '{"keys":[],"count":0}')
 COUNT1=$(echo "$NODE1" | grep -o '"count":[0-9]*' | cut -d: -f2)
 COUNT2=$(echo "$NODE2" | grep -o '"count":[0-9]*' | cut -d: -f2)
 COUNT3=$(echo "$NODE3" | grep -o '"count":[0-9]*' | cut -d: -f2)
