@@ -133,19 +133,35 @@ else
     echo "⚠️  Some nodes don't have data yet"
 fi
 
-# Test specific key
+# Test replication
 echo ""
 echo "=========================================="
-echo "  KEY LOOKUP TEST"
+echo "  REPLICATION TEST"
 echo "=========================================="
 TEST_KEY="user-5"
-echo "Finding which node has '$TEST_KEY'..."
+echo "Testing if '$TEST_KEY' is replicated across nodes..."
+echo ""
+
+FOUND_COUNT=0
 for PORT in 9080 9081 9082; do
     RESULT=$(curl -s "http://localhost:$PORT/kv/get?key=$TEST_KEY" 2>/dev/null)
     if echo "$RESULT" | grep -q '"key"'; then
-        echo "  ✓ Found on node at port $PORT"
+        VALUE=$(echo "$RESULT" | grep -o '"value":"[^"]*"' | cut -d'"' -f4)
+        echo "  ✓ Node at port $PORT has: $TEST_KEY = $VALUE"
+        FOUND_COUNT=$((FOUND_COUNT + 1))
+    else
+        echo "  ✗ Node at port $PORT does NOT have: $TEST_KEY"
     fi
 done
+
+echo ""
+if [ $FOUND_COUNT -eq 3 ]; then
+    echo "✅ Perfect! Key is replicated on all 3 nodes (RF=3)"
+elif [ $FOUND_COUNT -gt 1 ]; then
+    echo "✅ Good! Key is replicated on $FOUND_COUNT nodes"
+else
+    echo "⚠️  Key found on only $FOUND_COUNT node(s)"
+fi
 
 # Cleanup
 echo ""

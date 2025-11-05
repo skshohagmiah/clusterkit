@@ -12,10 +12,12 @@ ClusterKit provides **cluster coordination** (nodes, partitions, consensus) whil
 - 🎯 **Cluster Coordination** - Automatic node discovery and membership management
 - 📦 **Partition Management** - Consistent hashing for data distribution
 - 🔄 **Raft Consensus** - Production-grade consensus using HashiCorp Raft
-- 🎭 **Leader Election** - Automatic leader election
-- 🔍 **Simple API** - Just 7 methods to learn
+- 🎭 **Leader Election** - Automatic leader election and failover
+- 🔍 **Simple API** - Just 7 core methods + 1 hook
+- 🪝 **Partition Change Hooks** - Automatic notifications for data migration
 - 🌐 **HTTP API** - RESTful endpoints for cluster management
 - 💾 **State Persistence** - WAL and snapshots for crash recovery
+- 📊 **Metrics & Health** - Built-in monitoring endpoints
 
 ## 🎯 What ClusterKit Does
 
@@ -26,10 +28,12 @@ ClusterKit provides **cluster coordination** (nodes, partitions, consensus) whil
 - ✅ Which nodes (primary + replicas) should store the data
 - ✅ Whether current node is primary or replica
 - ✅ Leader election and consensus
+- ✅ Notifications when partitions change (for data migration)
 
 **You Implement:**
-- 🔧 Data storage (PostgreSQL, Redis, MongoDB, etc.)
+- 🔧 Data storage (PostgreSQL, Redis, RocksDB, etc.)
 - 🔧 Data replication (HTTP, gRPC, etc.)
+- 🔧 Data migration logic
 - 🔧 Business logic
 
 ## Installation
@@ -100,7 +104,9 @@ for _, replica := range replicas {
 
 ## Complete API Reference
 
-ClusterKit has just **7 simple methods**:
+ClusterKit has just **7 core methods + 1 hook**:
+
+### Core Methods
 
 ```go
 // 1. Get partition for a key
@@ -123,6 +129,22 @@ isReplica := ck.IsReplica(partition *Partition) bool
 
 // 7. Get current node ID
 myNodeID := ck.GetMyNodeID() string
+```
+
+### Partition Change Hook
+
+```go
+// 8. Register hook for partition changes (data migration)
+ck.OnPartitionChange(func(partitionID string, copyFrom *Node, copyTo *Node) {
+    // partitionID: Which partition changed
+    // copyFrom: Node to copy data from (has the data)
+    // copyTo: Node that needs the data (YOU if this is your node)
+    
+    if copyTo.ID == myNodeID && copyFrom != nil {
+        // Copy data from copyFrom node
+        fetchDataFrom(copyFrom.IP, partitionID)
+    }
+})
 ```
 
 That's it! No complex APIs, no confusion.
@@ -190,6 +212,77 @@ func (kv *DistributedKV) Get(key string) (string, error) {
 ```
 
 See the [example](./example) directory for a complete working implementation.
+
+## Handling Data Migration
+
+When nodes join or leave the cluster, partitions are reassigned. Use the `OnPartitionChange` hook to automatically migrate data:
+
+```go
+// Register the hook during initialization
+ck.OnPartitionChange(func(partitionID string, copyFrom *Node, copyTo *Node) {
+    myNodeID := ck.GetMyNodeID()
+    
+    // Only act if I'm the target node
+    if copyTo == nil || copyTo.ID != myNodeID {
+        return
+    }
+    
+    fmt.Printf("I need data for partition %s\n", partitionID)
+    
+    // Copy data from source node
+    if copyFrom != nil {
+        fmt.Printf("Copying from %s (%s)\n", copyFrom.ID, copyFrom.IP)
+        go copyPartitionData(partitionID, copyFrom)
+    } else {
+        fmt.Printf("No source (I already have the data)\n")
+    }
+})
+
+func copyPartitionData(partitionID string, fromNode *Node) {
+    // 1. Fetch all keys for this partition from the source node
+    url := fmt.Sprintf("http://%s/keys?partition=%s", fromNode.IP, partitionID)
+    keys := httpGet(url)
+    
+    // 2. Copy each key
+    for _, key := range keys {
+        value := httpGet(fmt.Sprintf("http://%s/get?key=%s", fromNode.IP, key))
+        localStore[key] = value
+    }
+    
+    fmt.Printf("✓ Copied %d keys for partition %s\n", len(keys), partitionID)
+}
+```
+
+### When Hooks Fire
+
+**Node Dies:**
+```
+Before: partition-5 → Node 1 (primary), Node 2 (replica), Node 3 (replica)
+Node 1 dies ❌
+After:  partition-5 → Node 2 (NEW primary), Node 3 (replica), Node 4 (NEW replica)
+
+Hook fires on Node 4:
+  partitionID: "partition-5"
+  copyFrom: &Node{ID: "node-2", IP: ":8081"}  ← Copy from here!
+  copyTo: &Node{ID: "node-4", IP: ":8083"}    ← That's me!
+```
+
+**Node Joins:**
+```
+3 nodes → 4 nodes join → Partitions rebalanced
+
+Hook fires multiple times for affected partitions:
+  - partition-3 moves to Node 4 → Copy from Node 1
+  - partition-7 moves to Node 4 → Copy from Node 2
+  - partition-12 moves to Node 4 → Copy from Node 3
+```
+
+**Key Points:**
+- ✅ Hook fires on ALL nodes, but only the target node acts
+- ✅ `copyFrom` is always a live node with the data
+- ✅ `copyTo` is the node that needs the data
+- ✅ Hook runs in goroutine (non-blocking)
+- ✅ With RF≥2, you never lose data (replicas have copies)
 
 ## Starting a 3-Node Cluster
 
@@ -289,6 +382,63 @@ type Config struct {
     └─────────┴─────────┴─────────┘
 ```
 
+## Use Cases
+
+ClusterKit is perfect for building:
+
+### ✅ **Distributed Databases**
+```go
+// Your new database "MyDB"
+ck := clusterkit.NewClusterKit(opts)
+partition, _ := ck.GetPartition("users:123")
+primary := ck.GetPrimary(partition)
+// Store data on primary, replicate to replicas
+```
+
+### ✅ **Distributed Caches**
+```go
+// Your new cache "FastCache"
+ck := clusterkit.NewClusterKit(opts)
+partition, _ := ck.GetPartition("session:abc")
+if ck.IsPrimary(partition) {
+    cache.Set(key, value)
+}
+```
+
+### ✅ **Distributed Queues**
+```go
+// Your new queue "ReliableQ"
+ck := clusterkit.NewClusterKit(opts)
+partition, _ := ck.GetPartition("queue:orders")
+primary := ck.GetPrimary(partition)
+// Send messages to primary
+```
+
+### ✅ **Distributed File Systems**
+```go
+// Your new FS "CloudFS"
+ck := clusterkit.NewClusterKit(opts)
+partition, _ := ck.GetPartition("file:document.pdf")
+nodes := ck.GetNodes(partition)
+// Store file chunks across nodes
+```
+
+### ✅ **Distributed Key-Value Stores**
+```go
+// Your new KV store "FastKV"
+ck := clusterkit.NewClusterKit(opts)
+// Add persistent storage (RocksDB, BadgerDB)
+// Add quorum writes
+// Add conflict resolution
+```
+
+**Perfect for:**
+- 🎓 Learning distributed systems
+- 🚀 Startups building infrastructure
+- 🔬 Research projects
+- 💡 Side projects
+- 🏢 Custom distributed solutions
+
 ## Why ClusterKit?
 
 **Before ClusterKit:**
@@ -313,13 +463,24 @@ replicas := ck.GetReplicas(partition)
 
 ## Production Checklist
 
+### ClusterKit Configuration
 - ✅ Use environment variables for configuration
 - ✅ Set appropriate `PartitionCount` (16-256 recommended)
-- ✅ Set `ReplicationFactor` based on availability needs
+- ✅ Set `ReplicationFactor` ≥ 3 for high availability
 - ✅ Use persistent storage for `DataDir`
 - ✅ Monitor `/health` and `/metrics` endpoints
-- ✅ Implement proper error handling and retries
 - ✅ Use TLS for production deployments
+
+### Your Application
+- ✅ Implement durable storage (RocksDB, BadgerDB, etc.)
+- ✅ Register `OnPartitionChange` hook for data migration
+- ✅ Implement proper error handling and retries
+- ✅ Add batching for replication (don't send one key at a time)
+- ✅ Add rate limiting for migrations
+- ✅ Verify data after migration
+- ✅ Clean up old data after successful migration
+- ✅ Add metrics and monitoring
+- ✅ Test failure scenarios (kill nodes, network partitions)
 
 ## Examples
 

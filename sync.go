@@ -146,6 +146,7 @@ func (ck *ClusterKit) handleSync(w http.ResponseWriter, r *http.Request) {
 		}
 		if !found {
 			ck.cluster.Nodes = append(ck.cluster.Nodes, incomingNode)
+			ck.cluster.rebuildNodeMap() // Rebuild map for O(1) lookups
 		}
 	}
 	ck.mu.Unlock()
@@ -387,6 +388,7 @@ func (ck *ClusterKit) joinNode(nodeAddr string) error {
 					}
 					if !exists {
 						ck.cluster.Nodes = append(ck.cluster.Nodes, node)
+						ck.cluster.rebuildNodeMap() // Rebuild map for O(1) lookups
 					}
 				}
 			}

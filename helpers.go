@@ -7,6 +7,7 @@ import "context"
 // ============================================
 
 // GetNodes returns all nodes (primary + replicas) for a partition
+// Time Complexity: O(R) where R = replication factor
 func (ck *ClusterKit) GetNodes(partition *Partition) []Node {
 	if partition == nil {
 		return []Node{}
@@ -15,23 +16,17 @@ func (ck *ClusterKit) GetNodes(partition *Partition) []Node {
 	ck.mu.RLock()
 	defer ck.mu.RUnlock()
 
-	var nodes []Node
+	nodes := make([]Node, 0, 1+len(partition.ReplicaNodes))
 
-	// Add primary node
-	for _, node := range ck.cluster.Nodes {
-		if node.ID == partition.PrimaryNode {
-			nodes = append(nodes, node)
-			break
-		}
+	// Add primary node - O(1) map lookup
+	if primaryNode, exists := ck.cluster.NodeMap[partition.PrimaryNode]; exists {
+		nodes = append(nodes, *primaryNode)
 	}
 
-	// Add replica nodes
+	// Add replica nodes - O(R) where R = replication factor
 	for _, replicaID := range partition.ReplicaNodes {
-		for _, node := range ck.cluster.Nodes {
-			if node.ID == replicaID {
-				nodes = append(nodes, node)
-				break
-			}
+		if replicaNode, exists := ck.cluster.NodeMap[replicaID]; exists {
+			nodes = append(nodes, *replicaNode)
 		}
 	}
 
@@ -39,6 +34,7 @@ func (ck *ClusterKit) GetNodes(partition *Partition) []Node {
 }
 
 // GetPrimary returns the primary node for a partition
+// Time Complexity: O(1)
 func (ck *ClusterKit) GetPrimary(partition *Partition) *Node {
 	if partition == nil {
 		return nil
@@ -47,17 +43,17 @@ func (ck *ClusterKit) GetPrimary(partition *Partition) *Node {
 	ck.mu.RLock()
 	defer ck.mu.RUnlock()
 
-	for _, node := range ck.cluster.Nodes {
-		if node.ID == partition.PrimaryNode {
-			nodeCopy := node
-			return &nodeCopy
-		}
+	// O(1) map lookup
+	if primaryNode, exists := ck.cluster.NodeMap[partition.PrimaryNode]; exists {
+		nodeCopy := *primaryNode
+		return &nodeCopy
 	}
 
 	return nil
 }
 
 // GetReplicas returns the replica nodes for a partition
+// Time Complexity: O(R) where R = replication factor
 func (ck *ClusterKit) GetReplicas(partition *Partition) []Node {
 	if partition == nil {
 		return []Node{}
@@ -66,13 +62,12 @@ func (ck *ClusterKit) GetReplicas(partition *Partition) []Node {
 	ck.mu.RLock()
 	defer ck.mu.RUnlock()
 
-	var replicas []Node
+	replicas := make([]Node, 0, len(partition.ReplicaNodes))
+	
+	// O(R) - loop through replicas with O(1) map lookup each
 	for _, replicaID := range partition.ReplicaNodes {
-		for _, node := range ck.cluster.Nodes {
-			if node.ID == replicaID {
-				replicas = append(replicas, node)
-				break
-			}
+		if replicaNode, exists := ck.cluster.NodeMap[replicaID]; exists {
+			replicas = append(replicas, *replicaNode)
 		}
 	}
 

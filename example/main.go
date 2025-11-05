@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -54,18 +55,24 @@ func main() {
 	}
 
 	fmt.Printf("\n=== Distributed KV Store Started ===\n")
-	fmt.Printf("Node ID: %s\n", nodeID)
 	fmt.Printf("Node Name: %s\n", nodeName)
 	fmt.Printf("HTTP Address: %s\n", httpAddr)
 	fmt.Printf("Data Directory: %s\n", dataDir)
 	fmt.Printf("====================================\n\n")
 
-	// Initialize distributed KV store
-	kvStore := NewDistributedKV(ck, httpAddr)
-	kvStore.Start()
+	// Start KV store
+	kv := NewDistributedKV(ck, httpAddr)
+	kv.Start()
+
+	// Register partition change hook for data migration
+	ck.OnPartitionChange(func(partitionID string, copyFrom *clusterkit.Node, copyTo *clusterkit.Node) {
+		kv.handlePartitionChange(partitionID, copyFrom, copyTo)
+	})
+
+	fmt.Printf("\n✓ Distributed KV Store is running\n")
 
 	// Run periodic status updates
-	go runStatusUpdates(ck, kvStore)
+	go runStatusUpdates(ck, kv)
 
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
@@ -73,7 +80,7 @@ func main() {
 	<-sigChan
 
 	fmt.Println("\nShutting down...")
-	kvStore.Stop()
+	kv.Stop()
 	if err := ck.Stop(); err != nil {
 		log.Printf("Error stopping ClusterKit: %v", err)
 	}
@@ -105,6 +112,7 @@ func (kv *DistributedKV) Start() {
 	mux.HandleFunc("/kv/delete", kv.handleDelete)
 	mux.HandleFunc("/kv/list", kv.handleList)
 	mux.HandleFunc("/kv/stats", kv.handleStats)
+	mux.HandleFunc("/kv/replicate", kv.handleReplicate) // Internal replication endpoint
 
 	// Use a different port for KV API (add 1000 to cluster port)
 	// Extract port number from httpAddr (e.g., ":8080" -> 8080)
@@ -142,6 +150,93 @@ func (kv *DistributedKV) Stop() {
 	}
 }
 
+// handlePartitionChange is called when a partition assignment changes
+func (kv *DistributedKV) handlePartitionChange(partitionID string, copyFrom *clusterkit.Node, copyTo *clusterkit.Node) {
+	myNodeID := kv.ck.GetMyNodeID()
+
+	// Only care if I'm the target node
+	if copyTo == nil || copyTo.ID != myNodeID {
+		return
+	}
+
+	fmt.Printf("\n[PARTITION CHANGE] I need data for partition %s\n", partitionID)
+
+	// Copy data from the source node
+	if copyFrom != nil {
+		fmt.Printf("[MIGRATION] Copying from %s (%s)\n", copyFrom.ID, copyFrom.IP)
+		go kv.copyPartitionData(partitionID, copyFrom)
+	} else {
+		fmt.Printf("[MIGRATION] No source node (I already have the data)\n")
+	}
+}
+
+// copyPartitionData fetches all keys for a partition from another node
+func (kv *DistributedKV) copyPartitionData(partitionID string, fromNode *clusterkit.Node) {
+	if fromNode == nil {
+		fmt.Printf("[MIGRATION] ✗ No source node\n")
+		return
+	}
+
+	// Convert cluster port to KV port
+	kvAddr := fromNode.IP
+	if len(fromNode.IP) > 1 && fromNode.IP[0] == ':' {
+		var clusterPort int
+		fmt.Sscanf(fromNode.IP, ":%d", &clusterPort)
+		kvAddr = fmt.Sprintf(":%d", clusterPort+1000)
+	}
+
+	// Fetch all keys from the node
+	url := fmt.Sprintf("http://localhost%s/kv/list", kvAddr)
+	resp, err := http.Get(url)
+	if err != nil {
+		fmt.Printf("[MIGRATION] ✗ Failed to fetch from %s: %v\n", fromNode.ID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Keys  []string `json:"keys"`
+		Count int      `json:"count"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Printf("[MIGRATION] ✗ Failed to decode: %v\n", err)
+		return
+	}
+
+	// Copy each key that belongs to this partition
+	copiedCount := 0
+	for _, key := range result.Keys {
+		partition, err := kv.ck.GetPartition(key)
+		if err != nil || partition.ID != partitionID {
+			continue
+		}
+
+		// Fetch the value
+		getURL := fmt.Sprintf("http://localhost%s/kv/get?key=%s", kvAddr, key)
+		getResp, err := http.Get(getURL)
+		if err != nil {
+			continue
+		}
+
+		var keyValue struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		}
+
+		if err := json.NewDecoder(getResp.Body).Decode(&keyValue); err == nil {
+			kv.mu.Lock()
+			kv.localStore[keyValue.Key] = keyValue.Value
+			kv.mu.Unlock()
+			copiedCount++
+		}
+		getResp.Body.Close()
+	}
+
+	fmt.Printf("[MIGRATION] ✓ Copied %d keys for partition %s from %s\n",
+		copiedCount, partitionID, fromNode.ID)
+}
+
 // Set stores a key-value pair in the distributed store
 func (kv *DistributedKV) Set(key, value string) error {
 	// Step 1: Get partition for this key
@@ -154,34 +249,96 @@ func (kv *DistributedKV) Set(key, value string) error {
 	primary := kv.ck.GetPrimary(partition)
 	replicas := kv.ck.GetReplicas(partition)
 
-	fmt.Printf("[SET] Key '%s' -> Primary: %s, Replicas: %d\n", key, primary.ID, len(replicas))
+	fmt.Printf("[SET] Key '%s' -> Partition: %s, Primary: %s, Replicas: %d\n",
+		key, partition.ID, primary.ID, len(replicas))
 
-	// Step 3: Send to primary (in production: HTTP POST to primary node)
+	// Step 3: Handle primary
 	if kv.ck.IsPrimary(partition) {
+		// I'm the primary - store locally
 		kv.mu.Lock()
 		kv.localStore[key] = value
 		kv.mu.Unlock()
 		fmt.Printf("[SET] ✓ Stored on primary (me)\n")
+
+		// Replicate to all replicas in parallel
+		kv.replicateToNodes(key, value, replicas)
 	} else {
-		fmt.Printf("[SET] → Would send to primary: %s at %s\n", primary.ID, primary.IP)
+		// I'm not the primary - forward to primary
+		fmt.Printf("[SET] → Forwarding to primary: %s\n", primary.ID)
+		if err := kv.forwardToNode(primary, key, value); err != nil {
+			return fmt.Errorf("failed to forward to primary: %v", err)
+		}
 	}
 
-	// Step 4: Send to replicas (in production: parallel HTTP POST to replicas)
+	// Step 4: Handle if I'm a replica
 	if kv.ck.IsReplica(partition) {
 		kv.mu.Lock()
 		kv.localStore[key] = value
 		kv.mu.Unlock()
 		fmt.Printf("[SET] ✓ Stored on replica (me)\n")
 	}
-	
-	// Forward to other replicas
-	for _, replica := range replicas {
-		if replica.ID != kv.ck.GetMyNodeID() {
-			fmt.Printf("[SET] → Would send to replica: %s at %s\n", replica.ID, replica.IP)
-		}
+
+	return nil
+}
+
+// forwardToNode sends a key-value pair to another node via HTTP
+func (kv *DistributedKV) forwardToNode(node *clusterkit.Node, key, value string) error {
+	// Convert cluster port to KV port (add 1000)
+	// e.g., :8080 -> :9080, :8081 -> :9081
+	kvAddr := node.IP
+	if len(node.IP) > 1 && node.IP[0] == ':' {
+		var clusterPort int
+		fmt.Sscanf(node.IP, ":%d", &clusterPort)
+		kvAddr = fmt.Sprintf(":%d", clusterPort+1000)
+	}
+
+	url := fmt.Sprintf("http://localhost%s/kv/replicate", kvAddr)
+
+	payload := map[string]string{
+		"key":   key,
+		"value": value,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		fmt.Printf("[SET] ✗ Failed to send to %s: %v\n", node.ID, err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		fmt.Printf("[SET] ✓ Replicated to %s\n", node.ID)
+	} else {
+		fmt.Printf("[SET] ✗ Failed to replicate to %s: status %d\n", node.ID, resp.StatusCode)
 	}
 
 	return nil
+}
+
+// replicateToNodes sends data to multiple nodes in parallel
+func (kv *DistributedKV) replicateToNodes(key, value string, nodes []clusterkit.Node) {
+	var wg sync.WaitGroup
+	myNodeID := kv.ck.GetMyNodeID()
+
+	for _, node := range nodes {
+		// Skip self
+		if node.ID == myNodeID {
+			continue
+		}
+
+		wg.Add(1)
+		go func(n clusterkit.Node) {
+			defer wg.Done()
+			kv.forwardToNode(&n, key, value)
+		}(node)
+	}
+
+	wg.Wait()
 }
 
 // Get retrieves a value from the distributed store
@@ -195,7 +352,7 @@ func (kv *DistributedKV) Get(key string) (string, error) {
 		fmt.Printf("[GET] Retrieved from local store: %s = %s\n", key, value)
 		return value, nil
 	}
-	
+
 	return "", fmt.Errorf("key not found")
 }
 
@@ -226,6 +383,33 @@ func (kv *DistributedKV) handleGet(w http.ResponseWriter, r *http.Request) {
 		"key":   key,
 		"value": value,
 	})
+}
+
+func (kv *DistributedKV) handleReplicate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST method required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Store directly without triggering further replication
+	kv.mu.Lock()
+	kv.localStore[req.Key] = req.Value
+	kv.mu.Unlock()
+
+	fmt.Printf("[REPLICATE] Received replication: %s = %s\n", req.Key, req.Value)
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (kv *DistributedKV) handleSet(w http.ResponseWriter, r *http.Request) {
@@ -309,12 +493,12 @@ func (kv *DistributedKV) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"local_keys":      localCount,
-		"cluster_nodes":   metrics.NodeCount,
-		"partitions":      metrics.PartitionCount,
-		"is_leader":       metrics.IsLeader,
-		"raft_state":      metrics.RaftState,
-		"uptime_seconds":  metrics.UptimeSeconds,
+		"local_keys":     localCount,
+		"cluster_nodes":  metrics.NodeCount,
+		"partitions":     metrics.PartitionCount,
+		"is_leader":      metrics.IsLeader,
+		"raft_state":     metrics.RaftState,
+		"uptime_seconds": metrics.UptimeSeconds,
 	})
 }
 

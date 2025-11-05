@@ -29,11 +29,12 @@ type PartitionMap struct {
 
 // Cluster represents the entire distributed cluster
 type Cluster struct {
-	ID           string        `json:"id"`
-	Name         string        `json:"name"`
-	Nodes        []Node        `json:"nodes"`
-	PartitionMap *PartitionMap `json:"partition_map"`
-	Config       *Config       `json:"config"`
+	ID           string           `json:"id"`
+	Name         string           `json:"name"`
+	Nodes        []Node           `json:"nodes"`
+	NodeMap      map[string]*Node `json:"-"` // O(1) node lookup by ID
+	PartitionMap *PartitionMap    `json:"partition_map"`
+	Config       *Config          `json:"config"`
 }
 
 // Config holds cluster configuration
@@ -66,14 +67,14 @@ type WALEntry struct {
 
 // Metrics represents cluster metrics and monitoring data
 type Metrics struct {
-	NodeCount       int       `json:"node_count"`
-	PartitionCount  int       `json:"partition_count"`
-	RequestCount    int64     `json:"request_count"`
-	ErrorCount      int64     `json:"error_count"`
-	LastSync        time.Time `json:"last_sync"`
-	IsLeader        bool      `json:"is_leader"`
-	RaftState       string    `json:"raft_state"`
-	UptimeSeconds   int64     `json:"uptime_seconds"`
+	NodeCount      int       `json:"node_count"`
+	PartitionCount int       `json:"partition_count"`
+	RequestCount   int64     `json:"request_count"`
+	ErrorCount     int64     `json:"error_count"`
+	LastSync       time.Time `json:"last_sync"`
+	IsLeader       bool      `json:"is_leader"`
+	RaftState      string    `json:"raft_state"`
+	UptimeSeconds  int64     `json:"uptime_seconds"`
 }
 
 // HealthStatus represents detailed health information

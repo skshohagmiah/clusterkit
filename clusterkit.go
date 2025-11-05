@@ -22,6 +22,7 @@ type ClusterKit struct {
 	stopChan         chan struct{}
 	syncInterval     time.Duration
 	consensusManager *ConsensusManager
+	hookManager      *HookManager // Partition change hooks
 	// Metrics tracking
 	startTime    time.Time
 	lastSync     time.Time
@@ -102,6 +103,7 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 		Status: "active",
 	}
 	cluster.Nodes = append(cluster.Nodes, selfNode)
+	cluster.rebuildNodeMap() // Initialize NodeMap for O(1) lookups
 
 	ck := &ClusterKit{
 		cluster:      cluster,
@@ -110,6 +112,7 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 		knownNodes:   []string{},
 		stopChan:     make(chan struct{}),
 		syncInterval: opts.SyncInterval,
+		hookManager:  newHookManager(),
 		startTime:    time.Now(),
 	}
 	
