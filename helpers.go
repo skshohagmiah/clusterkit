@@ -1,105 +1,128 @@
 package clusterkit
 
-import "fmt"
+import "context"
 
-// GetNodesForKey returns all nodes (primary + replicas) that should store this key
-// This is the main method developers should use - no need to check if you're primary!
-func (ck *ClusterKit) GetNodesForKey(key string) ([]Node, error) {
-	partition, err := ck.GetPartitionForKey(key)
-	if err != nil {
-		return nil, err
+// ============================================
+// SIMPLE API - Clean and Intuitive
+// ============================================
+
+// GetNodes returns all nodes (primary + replicas) for a partition
+func (ck *ClusterKit) GetNodes(partition *Partition) []Node {
+	if partition == nil {
+		return []Node{}
 	}
+
+	ck.mu.RLock()
+	defer ck.mu.RUnlock()
 
 	var nodes []Node
 
 	// Add primary node
-	primaryNode, err := ck.cluster.GetNodeByID(partition.PrimaryNode)
-	if err != nil {
-		return nil, fmt.Errorf("primary node not found: %v", err)
+	for _, node := range ck.cluster.Nodes {
+		if node.ID == partition.PrimaryNode {
+			nodes = append(nodes, node)
+			break
+		}
 	}
-	nodes = append(nodes, *primaryNode)
 
 	// Add replica nodes
 	for _, replicaID := range partition.ReplicaNodes {
-		replicaNode, err := ck.cluster.GetNodeByID(replicaID)
-		if err != nil {
-			continue // Skip if replica not found
+		for _, node := range ck.cluster.Nodes {
+			if node.ID == replicaID {
+				nodes = append(nodes, node)
+				break
+			}
 		}
-		nodes = append(nodes, *replicaNode)
 	}
 
-	return nodes, nil
+	return nodes
 }
 
-// GetPrimaryNodeForKey returns the primary node for a key
-func (ck *ClusterKit) GetPrimaryNodeForKey(key string) (*Node, error) {
-	partition, err := ck.GetPartitionForKey(key)
-	if err != nil {
-		return nil, err
+// GetPrimary returns the primary node for a partition
+func (ck *ClusterKit) GetPrimary(partition *Partition) *Node {
+	if partition == nil {
+		return nil
 	}
 
-	return ck.cluster.GetNodeByID(partition.PrimaryNode)
+	ck.mu.RLock()
+	defer ck.mu.RUnlock()
+
+	for _, node := range ck.cluster.Nodes {
+		if node.ID == partition.PrimaryNode {
+			nodeCopy := node
+			return &nodeCopy
+		}
+	}
+
+	return nil
 }
 
-// GetReplicaNodesForKey returns all replica nodes for a key
-func (ck *ClusterKit) GetReplicaNodesForKey(key string) ([]Node, error) {
-	partition, err := ck.GetPartitionForKey(key)
-	if err != nil {
-		return nil, err
+// GetReplicas returns the replica nodes for a partition
+func (ck *ClusterKit) GetReplicas(partition *Partition) []Node {
+	if partition == nil {
+		return []Node{}
 	}
+
+	ck.mu.RLock()
+	defer ck.mu.RUnlock()
 
 	var replicas []Node
 	for _, replicaID := range partition.ReplicaNodes {
-		node, err := ck.cluster.GetNodeByID(replicaID)
-		if err != nil {
-			continue
+		for _, node := range ck.cluster.Nodes {
+			if node.ID == replicaID {
+				replicas = append(replicas, node)
+				break
+			}
 		}
-		replicas = append(replicas, *node)
 	}
 
-	return replicas, nil
+	return replicas
 }
 
-// AmIResponsibleFor checks if the current node should handle this key
-// Returns: (shouldHandle bool, role string, allNodes []Node)
-// role: "primary", "replica", or ""
-func (ck *ClusterKit) AmIResponsibleFor(key string) (bool, string, []Node, error) {
-	partition, err := ck.GetPartitionForKey(key)
-	if err != nil {
-		return false, "", nil, err
-	}
-
-	myNodeID := ck.cluster.ID
+// GetMyNodeID returns the current node's ID
+func (ck *ClusterKit) GetMyNodeID() string {
+	ck.mu.RLock()
+	defer ck.mu.RUnlock()
 	
-	// Get all nodes for this key
-	allNodes, err := ck.GetNodesForKey(key)
-	if err != nil {
-		return false, "", nil, err
+	if len(ck.cluster.Nodes) > 0 {
+		return ck.cluster.Nodes[0].ID
 	}
+	return ""
+}
 
-	// Check if primary
-	if partition.PrimaryNode == myNodeID {
-		return true, "primary", allNodes, nil
+// IsPrimary checks if the current node is the primary for a partition
+func (ck *ClusterKit) IsPrimary(partition *Partition) bool {
+	if partition == nil {
+		return false
 	}
+	myNodeID := ck.GetMyNodeID()
+	return partition.PrimaryNode == myNodeID
+}
 
-	// Check if replica
+// IsReplica checks if the current node is a replica for a partition
+func (ck *ClusterKit) IsReplica(partition *Partition) bool {
+	if partition == nil {
+		return false
+	}
+	myNodeID := ck.GetMyNodeID()
 	for _, replicaID := range partition.ReplicaNodes {
 		if replicaID == myNodeID {
-			return true, "replica", allNodes, nil
+			return true
 		}
 	}
-
-	return false, "", allNodes, nil
+	return false
 }
 
-// GetMyNodeInfo returns information about the current node
-func (ck *ClusterKit) GetMyNodeInfo() Node {
-	if len(ck.cluster.Nodes) > 0 {
-		return ck.cluster.Nodes[0] // First node is always self
-	}
-	return Node{
-		ID:     ck.cluster.ID,
-		IP:     ck.httpAddr,
-		Status: "active",
+// ============================================
+// Context-Aware Versions (Optional)
+// ============================================
+
+// GetPartitionWithContext returns partition for a key with context support
+func (ck *ClusterKit) GetPartitionWithContext(ctx context.Context, key string) (*Partition, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+		return ck.GetPartition(key)
 	}
 }

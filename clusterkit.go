@@ -1,8 +1,10 @@
 package clusterkit
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,13 +15,18 @@ import (
 type ClusterKit struct {
 	cluster          *Cluster
 	stateFile        string
-	walFile          string
 	httpAddr         string
+	httpServer       *http.Server
 	knownNodes       []string
 	mu               sync.RWMutex
 	stopChan         chan struct{}
 	syncInterval     time.Duration
 	consensusManager *ConsensusManager
+	// Metrics tracking
+	startTime    time.Time
+	lastSync     time.Time
+	requestCount int64
+	errorCount   int64
 }
 
 // Options for initializing ClusterKit
@@ -37,12 +44,33 @@ type Options struct {
 
 // NewClusterKit initializes a new ClusterKit instance
 func NewClusterKit(opts Options) (*ClusterKit, error) {
+	// Comprehensive input validation
 	if opts.NodeID == "" {
 		return nil, fmt.Errorf("NodeID is required")
+	}
+	if opts.NodeName == "" {
+		return nil, fmt.Errorf("NodeName is required")
 	}
 	if opts.HTTPAddr == "" {
 		return nil, fmt.Errorf("HTTPAddr is required")
 	}
+	if opts.RaftAddr == "" {
+		return nil, fmt.Errorf("RaftAddr is required")
+	}
+	if opts.Config == nil {
+		return nil, fmt.Errorf("Config is required")
+	}
+	if opts.Config.ClusterName == "" {
+		return nil, fmt.Errorf("ClusterName is required")
+	}
+	if opts.Config.PartitionCount <= 0 {
+		return nil, fmt.Errorf("PartitionCount must be > 0")
+	}
+	if opts.Config.ReplicationFactor <= 0 {
+		return nil, fmt.Errorf("ReplicationFactor must be > 0")
+	}
+	
+	// Set defaults for optional fields
 	if opts.DataDir == "" {
 		opts.DataDir = "./clusterkit-data"
 	}
@@ -56,11 +84,10 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 	}
 
 	stateFile := filepath.Join(opts.DataDir, "cluster-state.json")
-	walFile := filepath.Join(opts.DataDir, "wal.log")
 
 	// Initialize cluster
 	cluster := &Cluster{
-		ID:           opts.NodeID,
+		ID:           opts.Config.ClusterName, // Use cluster name as ID, not node ID
 		Name:         opts.Config.ClusterName,
 		Nodes:        []Node{},
 		PartitionMap: &PartitionMap{Partitions: make(map[string]*Partition)},
@@ -79,11 +106,11 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 	ck := &ClusterKit{
 		cluster:      cluster,
 		stateFile:    stateFile,
-		walFile:      walFile,
 		httpAddr:     opts.HTTPAddr,
 		knownNodes:   []string{},
 		stopChan:     make(chan struct{}),
 		syncInterval: opts.SyncInterval,
+		startTime:    time.Now(),
 	}
 	
 	// Set join address if provided
@@ -117,22 +144,66 @@ func (ck *ClusterKit) Start() error {
 	// Discover and join known nodes
 	go ck.discoverNodes()
 
-	// Start periodic state sync
-	go ck.syncLoop()
-
 	// Auto-create partitions if bootstrap node and no partitions exist
 	if ck.consensusManager.isBootstrap {
 		go func() {
 			// Wait for leader election
-			time.Sleep(2 * time.Second)
-			if ck.consensusManager.IsLeader() && len(ck.cluster.PartitionMap.Partitions) == 0 {
-				fmt.Println("Auto-creating partitions...")
-				if err := ck.CreatePartitions(); err != nil {
-					fmt.Printf("Failed to auto-create partitions: %v\n", err)
-				} else {
-					fmt.Printf("✓ Created %d partitions automatically\n", ck.cluster.Config.PartitionCount)
-				}
+			time.Sleep(3 * time.Second)
+			
+			ck.mu.RLock()
+			replicationFactor := ck.cluster.Config.ReplicationFactor
+			ck.mu.RUnlock()
+			
+			// Wait for enough nodes to join (up to 30 seconds)
+			maxWait := 30
+			if replicationFactor == 1 {
+				maxWait = 3 // Single-node clusters don't need to wait long
 			}
+			
+			for i := 0; i < maxWait; i++ {
+				if !ck.consensusManager.IsLeader() {
+					return // Not leader anymore
+				}
+				
+				ck.mu.RLock()
+				nodeCount := len(ck.cluster.Nodes)
+				partitionCount := len(ck.cluster.PartitionMap.Partitions)
+				ck.mu.RUnlock()
+				
+				// If partitions already exist, we're done
+				if partitionCount > 0 {
+					return
+				}
+				
+				// Create partitions if we have enough nodes
+				if nodeCount >= replicationFactor {
+					// Deduplicate nodes before creating partitions
+					ck.deduplicateNodes()
+					
+					ck.mu.RLock()
+					finalNodeCount := len(ck.cluster.Nodes)
+					ck.mu.RUnlock()
+					
+					fmt.Printf("Auto-creating partitions with %d nodes (replication factor: %d)...\n", finalNodeCount, replicationFactor)
+					if err := ck.CreatePartitions(); err != nil {
+						fmt.Printf("Failed to auto-create partitions: %v\n", err)
+						// Continue loop to retry
+					} else {
+						fmt.Printf("✓ Created %d partitions automatically\n", ck.cluster.Config.PartitionCount)
+						return // Success!
+					}
+				}
+				
+				// Wait before checking again
+				time.Sleep(1 * time.Second)
+			}
+			
+			// Timeout reached - log warning
+			ck.mu.RLock()
+			nodeCount := len(ck.cluster.Nodes)
+			ck.mu.RUnlock()
+			fmt.Printf("Warning: Partition auto-creation timed out after %d seconds (have %d nodes, need %d)\n", 
+				maxWait, nodeCount, replicationFactor)
 		}()
 	}
 
@@ -143,6 +214,15 @@ func (ck *ClusterKit) Start() error {
 // Stop gracefully shuts down ClusterKit
 func (ck *ClusterKit) Stop() error {
 	close(ck.stopChan)
+
+	// Gracefully shutdown HTTP server
+	if ck.httpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := ck.httpServer.Shutdown(ctx); err != nil {
+			fmt.Printf("Failed to shutdown HTTP server gracefully: %v\n", err)
+		}
+	}
 
 	// Stop consensus manager
 	ck.consensusManager.Stop()
@@ -222,10 +302,15 @@ func (ck *ClusterKit) syncWithNodes() {
 	ck.mu.RLock()
 	nodes := make([]Node, len(ck.cluster.Nodes))
 	copy(nodes, ck.cluster.Nodes)
+	// Get self node ID (first node in the list is always self)
+	var selfNodeID string
+	if len(nodes) > 0 {
+		selfNodeID = nodes[0].ID
+	}
 	ck.mu.RUnlock()
 
 	for _, node := range nodes {
-		if node.ID == ck.cluster.ID {
+		if node.ID == selfNodeID {
 			continue // Skip self
 		}
 
@@ -238,13 +323,102 @@ func (ck *ClusterKit) syncWithNodes() {
 	if err := ck.saveState(); err != nil {
 		fmt.Printf("Failed to save state: %v\n", err)
 	}
+
+	// Update last sync time
+	ck.mu.Lock()
+	ck.lastSync = time.Now()
+	ck.mu.Unlock()
 }
 
 // discoverNodes attempts to connect to known nodes
 func (ck *ClusterKit) discoverNodes() {
 	for _, nodeAddr := range ck.knownNodes {
-		if err := ck.joinNode(nodeAddr); err != nil {
-			fmt.Printf("Failed to join node %s: %v\n", nodeAddr, err)
+		if err := ck.joinNodeWithRetry(nodeAddr, 3); err != nil {
+			fmt.Printf("Failed to join node %s after retries: %v\n", nodeAddr, err)
 		}
+	}
+}
+
+// deduplicateNodes removes duplicate nodes from the cluster
+func (ck *ClusterKit) deduplicateNodes() {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	seen := make(map[string]bool)
+	uniqueNodes := []Node{}
+
+	for _, node := range ck.cluster.Nodes {
+		if !seen[node.ID] {
+			seen[node.ID] = true
+			uniqueNodes = append(uniqueNodes, node)
+		} else {
+			fmt.Printf("Removing duplicate node: %s (%s)\n", node.Name, node.ID)
+		}
+	}
+
+	ck.cluster.Nodes = uniqueNodes
+	fmt.Printf("Deduplicated nodes: %d -> %d\n", len(ck.cluster.Nodes)+len(seen)-len(uniqueNodes), len(uniqueNodes))
+}
+
+// GetMetrics returns current cluster metrics
+func (ck *ClusterKit) GetMetrics() *Metrics {
+	ck.mu.RLock()
+	defer ck.mu.RUnlock()
+
+	var raftState string
+	var isLeader bool
+	if ck.consensusManager != nil {
+		isLeader = ck.consensusManager.IsLeader()
+		if stats := ck.consensusManager.GetStats(); stats != nil {
+			raftState = stats.State
+		}
+	}
+
+	return &Metrics{
+		NodeCount:       len(ck.cluster.Nodes),
+		PartitionCount:  len(ck.cluster.PartitionMap.Partitions),
+		RequestCount:    ck.requestCount,
+		ErrorCount:      ck.errorCount,
+		LastSync:        ck.lastSync,
+		IsLeader:        isLeader,
+		RaftState:       raftState,
+		UptimeSeconds:   int64(time.Since(ck.startTime).Seconds()),
+	}
+}
+
+// HealthCheck returns detailed health status
+func (ck *ClusterKit) HealthCheck() *HealthStatus {
+	ck.mu.RLock()
+	defer ck.mu.RUnlock()
+
+	var raftState string
+	var isLeader bool
+	if ck.consensusManager != nil {
+		isLeader = ck.consensusManager.IsLeader()
+		if stats := ck.consensusManager.GetStats(); stats != nil {
+			raftState = stats.State
+		}
+	}
+
+	// Get self node info
+	var nodeID, nodeName string
+	if len(ck.cluster.Nodes) > 0 {
+		nodeID = ck.cluster.Nodes[0].ID
+		nodeName = ck.cluster.Nodes[0].Name
+	}
+
+	uptime := time.Since(ck.startTime)
+	healthy := len(ck.cluster.Nodes) > 0 && ck.consensusManager != nil
+
+	return &HealthStatus{
+		Healthy:        healthy,
+		NodeID:         nodeID,
+		NodeName:       nodeName,
+		IsLeader:       isLeader,
+		NodeCount:      len(ck.cluster.Nodes),
+		PartitionCount: len(ck.cluster.PartitionMap.Partitions),
+		RaftState:      raftState,
+		LastSync:       ck.lastSync,
+		Uptime:         uptime.String(),
 	}
 }

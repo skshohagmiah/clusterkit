@@ -34,7 +34,6 @@ type Cluster struct {
 	Nodes        []Node        `json:"nodes"`
 	PartitionMap *PartitionMap `json:"partition_map"`
 	Config       *Config       `json:"config"`
-	mu           sync.RWMutex
 }
 
 // Config holds cluster configuration
@@ -63,4 +62,29 @@ type WALEntry struct {
 	Operation string      `json:"operation"`
 	Data      interface{} `json:"data"`
 	Timestamp time.Time   `json:"timestamp"`
+}
+
+// Metrics represents cluster metrics and monitoring data
+type Metrics struct {
+	NodeCount       int       `json:"node_count"`
+	PartitionCount  int       `json:"partition_count"`
+	RequestCount    int64     `json:"request_count"`
+	ErrorCount      int64     `json:"error_count"`
+	LastSync        time.Time `json:"last_sync"`
+	IsLeader        bool      `json:"is_leader"`
+	RaftState       string    `json:"raft_state"`
+	UptimeSeconds   int64     `json:"uptime_seconds"`
+}
+
+// HealthStatus represents detailed health information
+type HealthStatus struct {
+	Healthy        bool      `json:"healthy"`
+	NodeID         string    `json:"node_id"`
+	NodeName       string    `json:"node_name"`
+	IsLeader       bool      `json:"is_leader"`
+	NodeCount      int       `json:"node_count"`
+	PartitionCount int       `json:"partition_count"`
+	RaftState      string    `json:"raft_state"`
+	LastSync       time.Time `json:"last_sync"`
+	Uptime         string    `json:"uptime"`
 }

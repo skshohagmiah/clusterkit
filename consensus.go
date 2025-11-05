@@ -318,7 +318,14 @@ func (cm *ConsensusManager) Start() error {
 
 	// Setup Raft configuration
 	config := raft.DefaultConfig()
-	config.LocalID = raft.ServerID(cm.ck.cluster.ID)
+	// Use the node ID, not the cluster ID
+	var nodeID string
+	if len(cm.ck.cluster.Nodes) > 0 {
+		nodeID = cm.ck.cluster.Nodes[0].ID
+	} else {
+		nodeID = cm.ck.cluster.ID // Fallback
+	}
+	config.LocalID = raft.ServerID(nodeID)
 
 	// Setup Raft communication
 	addr, err := net.ResolveTCPAddr("tcp", cm.raftBind)
