@@ -40,28 +40,16 @@ ClusterKit provides **cluster coordination** (nodes, partitions, consensus) whil
 
 ## Why ClusterKit?
 
-### 🚀 Simplest API in Distributed Systems
+ClusterKit is designed for developers who need **cluster coordination without the complexity**. Instead of managing consensus, partitioning, and node discovery yourself, ClusterKit handles it all while letting you focus on your application logic.
 
-```go
-// Other libraries require 10+ configuration fields
-// ClusterKit requires only 2!
+### Key Design Principles
 
-ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
-    NodeID:   "node-1",
-    HTTPAddr: ":8080",
-})
-```
-
-### ⚡ Key Advantages
-
-| Feature | ClusterKit | Redis Cluster | Consul | Etcd |
-|---------|-----------|---------------|--------|------|
-| **Required Config** | 2 fields | 10+ fields | 8+ fields | 6+ fields |
-| **Auto Port Calc** | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| **Auto Rebalancing** | ✅ Yes | ✅ Yes | ❌ No | ❌ No |
-| **Partition Hooks** | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| **Bring Your DB** | ✅ Yes | ❌ No | ❌ No | ❌ No |
-| **Learning Curve** | 5 min | 2 hours | 4 hours | 3 hours |
+- **Minimal Configuration** - Only 2 required fields (NodeID, HTTPAddr)
+- **Smart Defaults** - Production-ready settings out of the box
+- **Protocol Agnostic** - Use HTTP, gRPC, or any protocol for your data layer
+- **Bring Your Own Storage** - Works with any database (PostgreSQL, Redis, RocksDB, etc.)
+- **Automatic Rebalancing** - Handles partition migration when nodes join/leave
+- **Production Ready** - Built on HashiCorp Raft for strong consistency
 
 ## Installation
 
