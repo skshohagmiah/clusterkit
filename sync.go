@@ -25,9 +25,8 @@ func (ck *ClusterKit) startHTTPServer() error {
 
 	// Node registration endpoint
 	mux.HandleFunc("/join", ck.handleJoin)
-	
-	// State synchronization endpoint
-	mux.HandleFunc("/sync", ck.handleSync)
+
+	// Note: State synchronization is handled by Raft consensus, no separate /sync endpoint needed
 
 	// Partition endpoints
 	mux.HandleFunc("/partitions", ck.handleGetPartitions)
@@ -38,13 +37,18 @@ func (ck *ClusterKit) startHTTPServer() error {
 	mux.HandleFunc("/consensus/leader", ck.handleGetLeader)
 	mux.HandleFunc("/consensus/stats", ck.handleGetConsensusStats)
 
-	server := &http.Server{
+	// Metrics and monitoring endpoints
+	mux.HandleFunc("/metrics", ck.handleGetMetrics)
+	mux.HandleFunc("/health/detailed", ck.handleHealthCheck)
+	mux.HandleFunc("/cluster", ck.handleGetCluster)
+
+	ck.httpServer = &http.Server{
 		Addr:    ck.httpAddr,
 		Handler: mux,
 	}
 
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := ck.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			fmt.Printf("HTTP server error: %v\n", err)
 		}
 	}()
@@ -72,7 +76,7 @@ func (ck *ClusterKit) handleJoin(w http.ResponseWriter, r *http.Request) {
 		Node     Node   `json:"node"`
 		RaftAddr string `json:"raft_addr"`
 	}
-	
+
 	if err := json.NewDecoder(r.Body).Decode(&joinReq); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -142,6 +146,7 @@ func (ck *ClusterKit) handleSync(w http.ResponseWriter, r *http.Request) {
 		}
 		if !found {
 			ck.cluster.Nodes = append(ck.cluster.Nodes, incomingNode)
+			ck.cluster.rebuildNodeMap() // Rebuild map for O(1) lookups
 		}
 	}
 	ck.mu.Unlock()
@@ -159,17 +164,88 @@ func (ck *ClusterKit) handleSync(w http.ResponseWriter, r *http.Request) {
 // handleGetCluster returns the current cluster state
 func (ck *ClusterKit) handleGetCluster(w http.ResponseWriter, r *http.Request) {
 	ck.mu.RLock()
-	cluster := ck.cluster
+	// Create a deep copy to avoid race conditions
+	clusterCopy := Cluster{
+		ID:     ck.cluster.ID,
+		Name:   ck.cluster.Name,
+		Nodes:  make([]Node, len(ck.cluster.Nodes)),
+		Config: ck.cluster.Config,
+	}
+	copy(clusterCopy.Nodes, ck.cluster.Nodes)
+
+	// Copy partition map if it exists
+	if ck.cluster.PartitionMap != nil {
+		clusterCopy.PartitionMap = &PartitionMap{
+			Partitions: make(map[string]*Partition),
+		}
+		for k, v := range ck.cluster.PartitionMap.Partitions {
+			partCopy := &Partition{
+				ID:           v.ID,
+				PrimaryNode:  v.PrimaryNode,
+				ReplicaNodes: make([]string, len(v.ReplicaNodes)),
+			}
+			copy(partCopy.ReplicaNodes, v.ReplicaNodes)
+			clusterCopy.PartitionMap.Partitions[k] = partCopy
+		}
+	}
 	ck.mu.RUnlock()
 
+	// Generate ETag based on cluster state (node count + partition count)
+	etag := fmt.Sprintf("\"%d-%d\"", len(clusterCopy.Nodes), len(clusterCopy.PartitionMap.Partitions))
+
+	// Check If-None-Match header
+	if match := r.Header.Get("If-None-Match"); match != "" {
+		if match == etag {
+			// Topology hasn't changed
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
+	// Add hash function metadata to response
+	response := map[string]interface{}{
+		"cluster": clusterCopy,
+		"hash_config": map[string]interface{}{
+			"algorithm":  "fnv1a",
+			"seed":       0,
+			"modulo":     clusterCopy.Config.PartitionCount,
+			"format":     "partition-%d",
+		},
+	}
+	
+	// Set ETag header
+	w.Header().Set("ETAG", etag)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(cluster)
+	w.Header().Set("Cache-Control", "max-age=30") // Cache for 30 seconds
+	
+	data, err := json.Marshal(response)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Write(data)
 }
 
 // handleGetPartitions returns all partitions
 func (ck *ClusterKit) handleGetPartitions(w http.ResponseWriter, r *http.Request) {
 	partitions := ck.ListPartitions()
+
+	// Generate ETag based on partition count
+	etag := fmt.Sprintf("\"%d\"", len(partitions))
+
+	// Check If-None-Match header
+	if match := r.Header.Get("If-None-Match"); match != "" {
+		if match == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
+	// Set ETag header
+	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "max-age=30")
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"partitions": partitions,
 		"count":      len(partitions),
@@ -191,7 +267,7 @@ func (ck *ClusterKit) handleGetPartitionForKey(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	partition, err := ck.GetPartitionForKey(key)
+	partition, err := ck.GetPartition(key)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -223,14 +299,46 @@ func (ck *ClusterKit) handleGetConsensusStats(w http.ResponseWriter, r *http.Req
 // syncWithNode synchronizes state with a specific node
 func (ck *ClusterKit) syncWithNode(node Node) error {
 	ck.mu.RLock()
+	// Get self node info
+	var selfNodeID, selfNodeName string
+	if len(ck.cluster.Nodes) > 0 {
+		selfNodeID = ck.cluster.Nodes[0].ID
+		selfNodeName = ck.cluster.Nodes[0].Name
+	}
+
+	// Create a deep copy of the cluster to avoid race conditions
+	clusterCopy := Cluster{
+		ID:     ck.cluster.ID,
+		Name:   ck.cluster.Name,
+		Nodes:  make([]Node, len(ck.cluster.Nodes)),
+		Config: ck.cluster.Config,
+	}
+	copy(clusterCopy.Nodes, ck.cluster.Nodes)
+
+	// Copy partition map if it exists
+	if ck.cluster.PartitionMap != nil {
+		clusterCopy.PartitionMap = &PartitionMap{
+			Partitions: make(map[string]*Partition),
+		}
+		for k, v := range ck.cluster.PartitionMap.Partitions {
+			partCopy := &Partition{
+				ID:           v.ID,
+				PrimaryNode:  v.PrimaryNode,
+				ReplicaNodes: make([]string, len(v.ReplicaNodes)),
+			}
+			copy(partCopy.ReplicaNodes, v.ReplicaNodes)
+			clusterCopy.PartitionMap.Partitions[k] = partCopy
+		}
+	}
+
 	update := StateUpdate{
 		Node: Node{
-			ID:     ck.cluster.ID,
-			Name:   ck.cluster.Name,
+			ID:     selfNodeID,
+			Name:   selfNodeName,
 			IP:     ck.httpAddr,
 			Status: "active",
 		},
-		Cluster:   ck.cluster,
+		Cluster:   &clusterCopy,
 		Timestamp: time.Now(),
 	}
 	ck.mu.RUnlock()
@@ -257,15 +365,17 @@ func (ck *ClusterKit) syncWithNode(node Node) error {
 // joinNode attempts to join a node at the given address
 func (ck *ClusterKit) joinNode(nodeAddr string) error {
 	// Get self node info (first node in cluster is always self)
-	var nodeName string
+	var nodeID, nodeName string
 	if len(ck.cluster.Nodes) > 0 {
+		nodeID = ck.cluster.Nodes[0].ID
 		nodeName = ck.cluster.Nodes[0].Name
 	} else {
-		nodeName = ck.cluster.ID
+		nodeID = "unknown"
+		nodeName = "unknown"
 	}
-	
+
 	selfNode := Node{
-		ID:     ck.cluster.ID,
+		ID:     nodeID,
 		Name:   nodeName,
 		IP:     ck.httpAddr,
 		Status: "active",
@@ -321,6 +431,7 @@ func (ck *ClusterKit) joinNode(nodeAddr string) error {
 					}
 					if !exists {
 						ck.cluster.Nodes = append(ck.cluster.Nodes, node)
+						ck.cluster.rebuildNodeMap() // Rebuild map for O(1) lookups
 					}
 				}
 			}
@@ -330,4 +441,38 @@ func (ck *ClusterKit) joinNode(nodeAddr string) error {
 	}
 
 	return nil
+}
+
+// joinNodeWithRetry attempts to join a node with retry logic
+func (ck *ClusterKit) joinNodeWithRetry(nodeAddr string, maxRetries int) error {
+	for i := 0; i < maxRetries; i++ {
+		if err := ck.joinNode(nodeAddr); err == nil {
+			fmt.Printf("✓ Successfully joined node %s on attempt %d\n", nodeAddr, i+1)
+			return nil
+		} else {
+			fmt.Printf("Failed to join node %s (attempt %d/%d): %v\n", nodeAddr, i+1, maxRetries, err)
+		}
+
+		if i < maxRetries-1 {
+			// Exponential backoff: wait 1s, 2s, 4s, etc.
+			waitTime := time.Second * time.Duration(1<<uint(i))
+			fmt.Printf("Retrying in %v...\n", waitTime)
+			time.Sleep(waitTime)
+		}
+	}
+	return fmt.Errorf("failed to join node %s after %d retries", nodeAddr, maxRetries)
+}
+
+// handleGetMetrics returns cluster metrics
+func (ck *ClusterKit) handleGetMetrics(w http.ResponseWriter, r *http.Request) {
+	metrics := ck.GetMetrics()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}
+
+// handleHealthCheck returns detailed health status
+func (ck *ClusterKit) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
+	health := ck.HealthCheck()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(health)
 }

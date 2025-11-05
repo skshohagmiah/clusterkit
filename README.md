@@ -9,31 +9,34 @@ ClusterKit provides **cluster coordination** (nodes, partitions, consensus) whil
 
 ## ✨ Features
 
-| Feature | Description |
-|---------|-------------|
-| 🎯 **Cluster Coordination** | Automatic node discovery and membership management |
-| 📦 **Partition Management** | Consistent hashing for data distribution across nodes |
-| 🔄 **Raft Consensus** | Production-grade consensus using HashiCorp Raft |
-| 🎭 **Leader Election** | Automatic leader election for coordinated operations |
-| 🔍 **Replica Discovery** | Find primary and replica nodes for any key |
-| 🌐 **HTTP API** | RESTful endpoints for cluster management |
-| 💾 **State Persistence** | WAL and snapshots for crash recovery |
+- 🎯 **Cluster Coordination** - Automatic node discovery and membership management
+- 📦 **Partition Management** - Consistent hashing for data distribution
+- 🔄 **Raft Consensus** - Production-grade consensus using HashiCorp Raft
+- 🎭 **Leader Election** - Automatic leader election and failover
+- ⚡ **Simplified API** - Only 2 required fields! Auto-generates everything else
+- 🪝 **Partition Change Hooks** - Automatic notifications for data migration
+- 🔄 **Auto-Rebalancing** - Automatic partition rebalancing when nodes join
+- 🌐 **HTTP API** - RESTful endpoints for cluster management
+- 💾 **State Persistence** - WAL and snapshots for crash recovery
+- 📊 **Metrics & Health** - Built-in monitoring endpoints
+- 🐳 **Docker Ready** - Complete Docker Compose setup included
 
-## 🎯 What ClusterKit Does vs What You Do
+## 🎯 What ClusterKit Does
+
+**Think of ClusterKit as GPS for your distributed system** - it tells you WHERE data should go, YOU decide HOW to store it.
 
 **ClusterKit Provides:**
-- ✅ Node membership and discovery
-- ✅ Partition assignments (which node handles which data)
-- ✅ Replica node discovery
+- ✅ Which partition a key belongs to
+- ✅ Which nodes (primary + replicas) should store the data
+- ✅ Whether current node is primary or replica
 - ✅ Leader election and consensus
-- ✅ Cluster state synchronization
+- ✅ Notifications when partitions change (for data migration)
 
 **You Implement:**
-- 🔧 Data storage (PostgreSQL, Redis, MongoDB, etc.)
-- 🔧 Data replication (sync/async, quorum, etc.)
-- 🔧 Business logic and data models
-
-**Think of ClusterKit as a GPS for your distributed system** - it tells you where data should go, you decide how to store it.
+- 🔧 Data storage (PostgreSQL, Redis, RocksDB, etc.)
+- 🔧 Data replication (HTTP, gRPC, etc.)
+- 🔧 Data migration logic
+- 🔧 Business logic
 
 ## Installation
 
@@ -41,169 +44,29 @@ ClusterKit provides **cluster coordination** (nodes, partitions, consensus) whil
 go get github.com/skshohagmiah/clusterkit
 ```
 
-## 🐳 Try the Example with Docker (Demo Only)
-
-**Note:** ClusterKit is a **library** that you embed in your application. The Docker setup is for running the **example application** to see ClusterKit in action.
-
-```bash
-# Clone the repository
-git clone https://github.com/skshohagmiah/clusterkit
-cd clusterkit/example/docker
-
-# Start a 3-node example cluster
-docker-compose up
-
-# In another terminal, check cluster status
-curl http://localhost:8080/cluster
-curl http://localhost:8081/cluster
-curl http://localhost:8082/cluster
-```
-
-**This demo shows** a 3-node cluster with:
-- ✅ Automatic partition creation
-- ✅ Raft consensus
-- ✅ Leader election
-- ✅ Data persistence
-
-### Docker Commands
-
-```bash
-# Start cluster in background
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Check specific node
-docker-compose logs node1
-
-# Stop cluster
-docker-compose down
-
-# Stop and remove data
-docker-compose down -v
-
-# Rebuild after code changes
-docker-compose up --build
-```
-
-### Test the Cluster
-
-```bash
-# Check cluster status
-curl http://localhost:8080/cluster
-
-# Get partitions
-curl http://localhost:8080/partitions
-
-# Get partition for a key
-curl "http://localhost:8080/partitions/key?key=user:123"
-
-# Check consensus leader
-curl http://localhost:8080/consensus/leader
-
-# Check Raft stats
-curl http://localhost:8080/consensus/stats
-```
-
 ## Quick Start
 
-### Simple Example (The Easy Way)
+### 1. Initialize ClusterKit (Simplified API!)
 
-```go
-// 1. Initialize ClusterKit (partitions created automatically!)
-ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
-    NodeID:    "node-1",
-    NodeName:  "Server-1",
-    HTTPAddr:  ":8080",
-    RaftAddr:  "127.0.0.1:9001",
-    Bootstrap: true,  // First node
-    DataDir:   "./data",
-    Config: &clusterkit.Config{
-        ClusterName:       "my-app",
-        PartitionCount:    16,
-        ReplicationFactor: 3,
-    },
-})
-ck.Start()
-
-// 2. Get all nodes that should store this key
-nodes, _ := ck.GetNodesForKey("user:123")
-// Returns: [{node-1, :8080}, {node-2, :8081}, {node-3, :8082}]
-
-// 3. Write to all nodes (your choice: sync, async, quorum, etc.)
-for _, node := range nodes {
-    myDB.WriteToNode(node, "user:123", userData)
-}
-
-// 4. Read from any node
-data := myDB.ReadFromNode(nodes[0], "user:123")
-
-// That's it! No need to check if you're primary or replica!
-```
-
-### Check If You Should Handle a Key
-
-```go
-// Optional: Check if current node should handle this key
-shouldHandle, role, allNodes, _ := ck.AmIResponsibleFor("user:123")
-
-if shouldHandle {
-    // role is "primary" or "replica"
-    fmt.Printf("I'm the %s for this key\n", role)
-    
-    // Store locally
-    myDB.Write("user:123", userData)
-    
-    // Optionally replicate to other nodes
-    for _, node := range allNodes {
-        if node.ID != ck.GetMyNodeInfo().ID {
-            sendToNode(node, "user:123", userData)
-        }
-    }
-}
-```
-
-### Production-Ready Application (Using Environment Variables)
-
-**Your Application Code (main.go):**
 ```go
 package main
 
-import (
-    "log"
-    "os"
-    "strconv"
-    "time"
-    
-    "github.com/skshohagmiah/clusterkit"
-)
+import "github.com/skshohagmiah/clusterkit"
 
 func main() {
-    // Read configuration from environment variables
-    nodeID := getEnv("NODE_ID", "node-1")
-    nodeName := getEnv("NODE_NAME", "Server-1")
-    httpAddr := getEnv("HTTP_ADDR", ":8080")
-    raftAddr := getEnv("RAFT_ADDR", "127.0.0.1:9001")
-    joinAddr := getEnv("JOIN_ADDR", "")
-    bootstrap := getEnv("BOOTSTRAP", "false") == "true"
-    dataDir := getEnv("DATA_DIR", "./data")
-    
-    // Initialize ClusterKit
+    // Create first node (bootstrap) - Only 2 fields required!
     ck, err := clusterkit.NewClusterKit(clusterkit.Options{
-        NodeID:       nodeID,
-        NodeName:     nodeName,
-        HTTPAddr:     httpAddr,
-        RaftAddr:     raftAddr,
-        JoinAddr:     joinAddr,
-        Bootstrap:    bootstrap,
-        DataDir:      dataDir,
-        SyncInterval: 5 * time.Second,
-        Config: &clusterkit.Config{
-            ClusterName:       getEnv("CLUSTER_NAME", "my-cluster"),
-            PartitionCount:    getEnvInt("PARTITION_COUNT", 16),
-            ReplicationFactor: getEnvInt("REPLICATION_FACTOR", 3),
-        },
+        NodeID:   "node-1",  // Required
+        HTTPAddr: ":8080",   // Required
+        
+        // Everything else is optional with smart defaults:
+        // - NodeName: auto-generated ("Server-1")
+        // - RaftAddr: auto-calculated ("127.0.0.1:9001")
+        // - DataDir: "./clusterkit-data"
+        // - ClusterName: "clusterkit-cluster"
+        // - PartitionCount: 16
+        // - ReplicationFactor: 3
+        // - Bootstrap: auto-detected (true for node-1)
     })
     if err != nil {
         log.Fatal(err)
@@ -212,777 +75,657 @@ func main() {
     if err := ck.Start(); err != nil {
         log.Fatal(err)
     }
+    defer ck.Stop()
     
-    log.Printf("Application started with ClusterKit")
-    log.Printf("Node ID: %s", nodeID)
-    log.Printf("HTTP Address: %s", httpAddr)
-    
-    // Your application logic here
-    runYourApplication(ck)
-    
-    select {}
+    // Your application logic here...
+}
+```
+
+**That's it!** ClusterKit auto-generates NodeName, auto-calculates RaftAddr, and provides production-ready defaults.
+
+### 2. Use the Simple API
+
+```go
+// Step 1: Get partition for a key
+partition, err := ck.GetPartition("user:123")
+
+// Step 2: Get nodes
+primary := ck.GetPrimary(partition)
+replicas := ck.GetReplicas(partition)
+allNodes := ck.GetNodes(partition)  // primary + replicas
+
+// Step 3: Check if current node should handle it
+if ck.IsPrimary(partition) {
+    storeLocally(key, value)
 }
 
-func getEnv(key, defaultValue string) string {
-    if value := os.Getenv(key); value != "" {
-        return value
+if ck.IsReplica(partition) {
+    storeLocally(key, value)
+}
+
+// Step 4: Forward to other nodes
+for _, replica := range replicas {
+    if replica.ID != ck.GetMyNodeID() {
+        httpPost(replica, key, value)
     }
-    return defaultValue
 }
+```
 
-func getEnvInt(key string, defaultValue int) int {
-    if value := os.Getenv(key); value != "" {
-        if intVal, err := strconv.Atoi(value); err == nil {
-            return intVal
-        }
+## Complete API Reference
+
+ClusterKit has just **7 core methods + 1 hook**:
+
+### Core Methods
+
+```go
+// 1. Get partition for a key
+partition, err := ck.GetPartition(key string) (*Partition, error)
+
+// 2. Get primary node
+primary := ck.GetPrimary(partition *Partition) *Node
+
+// 3. Get replica nodes
+replicas := ck.GetReplicas(partition *Partition) []Node
+
+// 4. Get all nodes (primary + replicas)
+nodes := ck.GetNodes(partition *Partition) []Node
+
+// 5. Check if current node is primary
+isPrimary := ck.IsPrimary(partition *Partition) bool
+
+// 6. Check if current node is replica
+isReplica := ck.IsReplica(partition *Partition) bool
+
+// 7. Get current node ID
+myNodeID := ck.GetMyNodeID() string
+```
+
+### 3. Automatic Partition Rebalancing
+
+```go
+// ClusterKit automatically rebalances partitions when nodes join!
+// Just register a hook to handle data migration:
+
+ck.OnPartitionChange(func(partitionID string, copyFrom *clusterkit.Node, copyTo *clusterkit.Node) {
+    // Called automatically when:
+    // - A new node joins → partitions rebalance
+    // - Partitions are reassigned to new node
+    // - You are the target node (copyTo)
+    
+    if copyFrom != nil {
+        // Copy data from the old primary to new primary
+        migrateData(partitionID, copyFrom, copyTo)
     }
-    return defaultValue
+})
+
+// When node-4 joins:
+// 1. ClusterKit detects new node
+// 2. Recalculates partition assignments
+// 3. Triggers OnPartitionChange for affected partitions
+// 4. Your hook migrates data automatically
+// 5. Cluster is rebalanced! ✅
+```
+
+## Complete Example
+
+```go
+type DistributedKV struct{
+    ck    *clusterkit.ClusterKit
+    store map[string]string
+    mu    sync.RWMutex
 }
 
-func runYourApplication(ck *clusterkit.ClusterKit) {
-    // Your business logic here
-    // Use ck.GetNodesForKey(), ck.AmIResponsibleFor(), etc.
-}
-```
-
-**Then deploy with Docker Compose:**
-
-```yaml
-version: '3.8'
-
-services:
-  app-node1:
-    build: .
-    environment:
-      - NODE_ID=node-1
-      - NODE_NAME=Server-1
-      - HTTP_ADDR=:8080
-      - RAFT_ADDR=app-node1:9001
-      - BOOTSTRAP=true
-      - DATA_DIR=/data
-      - CLUSTER_NAME=my-app-cluster
-      - PARTITION_COUNT=16
-      - REPLICATION_FACTOR=3
-    ports:
-      - "8080:8080"
-    volumes:
-      - app1-data:/data
-
-  app-node2:
-    build: .
-    environment:
-      - NODE_ID=node-2
-      - NODE_NAME=Server-2
-      - HTTP_ADDR=:8080
-      - RAFT_ADDR=app-node2:9001
-      - JOIN_ADDR=app-node1:8080
-      - DATA_DIR=/data
-      - CLUSTER_NAME=my-app-cluster
-      - PARTITION_COUNT=16
-      - REPLICATION_FACTOR=3
-    ports:
-      - "8081:8080"
-    volumes:
-      - app2-data:/data
-    depends_on:
-      - app-node1
-
-  app-node3:
-    build: .
-    environment:
-      - NODE_ID=node-3
-      - NODE_NAME=Server-3
-      - HTTP_ADDR=:8080
-      - RAFT_ADDR=app-node3:9001
-      - JOIN_ADDR=app-node1:8080
-      - DATA_DIR=/data
-      - CLUSTER_NAME=my-app-cluster
-      - PARTITION_COUNT=16
-      - REPLICATION_FACTOR=3
-    ports:
-      - "8082:8080"
-    volumes:
-      - app3-data:/data
-    depends_on:
-      - app-node1
-
-volumes:
-  app1-data:
-  app2-data:
-  app3-data:
-```
-
-**Key Benefits:**
-- ✅ **Same code** runs on all nodes
-- ✅ **Environment-based** configuration
-- ✅ **Docker-friendly** - no hardcoded values
-- ✅ **Production-ready** - easy to deploy anywhere
-
-## How It Works
-
-1. **Initialization** - Each application instance initializes ClusterKit with a unique Node ID
-2. **HTTP Server** - ClusterKit starts an HTTP server for inter-node communication
-3. **Discovery** - New nodes connect to known nodes and exchange cluster state
-4. **State Sync** - Nodes periodically sync state with each other (default: 5 seconds)
-5. **Persistence** - Each node saves cluster state to disk in `cluster-state.json`
-6. **WAL Logging** - All operations are logged to `wal.log` for durability
-
-## API Reference
-
-### Creating a ClusterKit Instance
-
-```go
-type Options struct {
-    NodeID        string        // Unique ID for this node
-    NodeName      string        // Human-readable name
-    HTTPAddr      string        // Address to listen on (e.g., ":8080")
-    KnownNodes    []string      // List of known node addresses
-    DataDir       string        // Directory to store state and WAL
-    SyncInterval  time.Duration // How often to sync with other nodes
-    Config        *Config       // Cluster configuration
-}
-
-ck, err := clusterkit.NewClusterKit(options)
-```
-
-### Starting ClusterKit
-
-```go
-err := ck.Start()
-```
-
-### Getting Cluster State
-
-```go
-cluster := ck.GetCluster()
-fmt.Printf("Cluster: %s\n", cluster.Name)
-fmt.Printf("Total Nodes: %d\n", len(cluster.Nodes))
-```
-
-### Stopping ClusterKit
-
-```go
-err := ck.Stop() // Saves state before shutdown
-```
-
-## Environment Variables Example
-
-You can use environment variables to configure nodes:
-
-```bash
-# Node 1 (Bootstrap)
-NODE_ID=node-1 NODE_NAME=Server-1 HTTP_ADDR=:8080 BOOTSTRAP=true DATA_DIR=./data/node1 go run main.go
-
-# Node 2 (Join)
-NODE_ID=node-2 NODE_NAME=Server-2 HTTP_ADDR=:8081 JOIN_ADDR=localhost:8080 DATA_DIR=./data/node2 go run main.go
-
-# Node 3 (Join)
-NODE_ID=node-3 NODE_NAME=Server-3 HTTP_ADDR=:8082 JOIN_ADDR=localhost:8080 DATA_DIR=./data/node3 go run main.go
-```
-
-## HTTP Endpoints
-
-ClusterKit exposes these endpoints for inter-node communication:
-
-### Cluster Management
-- `GET /health` - Health check
-- `POST /join` - Node registration
-- `POST /sync` - State synchronization
-- `GET /cluster` - Get cluster state
-
-### Partition Management
-
-```go
-type DistributedKV struct {
-    ck      *clusterkit.ClusterKit
-    localDB map[string][]byte
-}
-
-func (kv *DistributedKV) Set(key string, value []byte) error {
-    // Get all nodes that should store this key
-    nodes, err := kv.ck.GetNodesForKey(key)
+func (kv *DistributedKV) Set(key, value string) error {
+    // Step 1: Get partition
+    partition, err := kv.ck.GetPartition(key)
     if err != nil {
         return err
     }
     
-    // Write to all nodes (you choose: sync, async, quorum, etc.)
-    for _, node := range nodes {
-        if node.ID == kv.ck.GetMyNodeInfo().ID {
-            // Store locally
-            kv.localDB[key] = value
-        } else {
-            // Replicate to other nodes
-            kv.replicateToNode(node, key, value)
+    // Step 2: Get nodes
+    primary := kv.ck.GetPrimary(partition)
+    replicas := kv.ck.GetReplicas(partition)
+    
+    // Step 3: Send to primary
+    if kv.ck.IsPrimary(partition) {
+        // I'm the primary - store locally
+        kv.mu.Lock()
+        kv.store[key] = value
+        kv.mu.Unlock()
+    } else {
+        // Forward to primary
+        httpPost(primary, key, value)
+    }
+    
+    // Step 4: Send to replicas
+    if kv.ck.IsReplica(partition) {
+        // I'm a replica - store locally
+        kv.mu.Lock()
+        kv.store[key] = value
+        kv.mu.Unlock()
+    }
+    
+    // Forward to other replicas
+    for _, replica := range replicas {
+        if replica.ID != kv.ck.GetMyNodeID() {
+            httpPost(replica, key, value)
         }
     }
     
     return nil
 }
 
-func (kv *DistributedKV) Get(key string) ([]byte, error) {
-    // Check if this node should have the data
-    shouldHandle, _, _, err := kv.ck.AmIResponsibleFor(key)
-    if err != nil {
-        return nil, err
-    }
+func (kv *DistributedKV) Get(key string) (string, error) {
+    // Simple: just check local store
+    kv.mu.RLock()
+    value, exists := kv.store[key]
+    kv.mu.RUnlock()
     
-    if shouldHandle {
-        // Read from local storage
-        return kv.localDB[key], nil
+    if exists {
+        return value, nil
     }
-    
-    // Forward to a node that has it
-    nodes, _ := kv.ck.GetNodesForKey(key)
-    return kv.readFromNode(nodes[0], key)
+    return "", fmt.Errorf("key not found")
 }
 ```
 
-**That's it!** ClusterKit handles:
-- ✅ Which nodes store which keys
-- ✅ Partition assignments
-- ✅ Rebalancing when nodes join/leave
-- ✅ Leader election
-- ✅ Consensus
+See the [example](./example) directory for a complete working implementation.
 
-You handle:
-- 🔧 Your storage (database, cache, etc.)
-- 🔧 Your replication strategy
-- 🔧 Your business logic
+## Handling Data Migration
 
-## 📚 API Reference
-
-### Initialization
-
-#### `NewClusterKit(options Options) (*ClusterKit, error)`
-
-Create a new ClusterKit instance.
+When nodes join or leave the cluster, partitions are reassigned. Use the `OnPartitionChange` hook to automatically migrate data:
 
 ```go
-ck, err := clusterkit.NewClusterKit(clusterkit.Options{
-    NodeID:       "node-1",           // Unique node identifier
-    NodeName:     "Server-1",         // Human-readable name
-    HTTPAddr:     ":8080",            // HTTP listen address
-    RaftAddr:     "127.0.0.1:9001",   // Raft bind address
-    Bootstrap:    true,               // true for first node only
-    JoinAddr:     "",                 // Address to join (empty for bootstrap)
-    DataDir:      "./data/node1",     // Data directory
-    SyncInterval: 5 * time.Second,    // State sync interval
-    Config: &clusterkit.Config{
-        ClusterName:       "my-cluster",
-        PartitionCount:    16,
-        ReplicationFactor: 3,
-    },
+// Register the hook during initialization
+ck.OnPartitionChange(func(partitionID string, copyFrom *Node, copyTo *Node) {
+    myNodeID := ck.GetMyNodeID()
+    
+    // Only act if I'm the target node
+    if copyTo == nil || copyTo.ID != myNodeID {
+        return
+    }
+    
+    fmt.Printf("I need data for partition %s\n", partitionID)
+    
+    // Copy data from source node
+    if copyFrom != nil {
+        fmt.Printf("Copying from %s (%s)\n", copyFrom.ID, copyFrom.IP)
+        go copyPartitionData(partitionID, copyFrom)
+    } else {
+        fmt.Printf("No source (I already have the data)\n")
+    }
 })
-```
 
-#### `Start() error`
-
-Start the ClusterKit instance (HTTP server, Raft, discovery).
-
-```go
-if err := ck.Start(); err != nil {
-    log.Fatal(err)
-}
-```
-
-#### `Stop() error`
-
-Gracefully shutdown ClusterKit.
-
-```go
-ck.Stop()
-```
-
----
-
-### Partition Management (Simple API)
-
-#### `GetNodesForKey(key string) ([]Node, error)` ⭐ **Most Used**
-
-Get ALL nodes (primary + replicas) that should store this key. **This is the main method you'll use!**
-
-```go
-nodes, err := ck.GetNodesForKey("user:123")
-// Returns: [{node-1, :8080}, {node-2, :8081}, {node-3, :8082}]
-
-// Write to all nodes
-for _, node := range nodes {
-    myDB.WriteToNode(node, "user:123", userData)
-}
-```
-
-#### `AmIResponsibleFor(key string) (bool, string, []Node, error)` ⭐ **Check Responsibility**
-
-Check if current node should handle this key and get all related nodes.
-
-```go
-shouldHandle, role, allNodes, err := ck.AmIResponsibleFor("user:123")
-// role: "primary", "replica", or ""
-
-if shouldHandle {
-    // Store locally
-    myDB.Write("user:123", userData)
+func copyPartitionData(partitionID string, fromNode *Node) {
+    // 1. Fetch all keys for this partition from the source node
+    url := fmt.Sprintf("http://%s/keys?partition=%s", fromNode.IP, partitionID)
+    keys := httpGet(url)
     
-    // Replicate to other nodes
-    for _, node := range allNodes {
-        if node.ID != myNodeID {
-            sendToNode(node, "user:123", userData)
+    // 2. Copy each key
+    for _, key := range keys {
+        value := httpGet(fmt.Sprintf("http://%s/get?key=%s", fromNode.IP, key))
+        localStore[key] = value
+    }
+    
+    fmt.Printf("✓ Copied %d keys for partition %s\n", len(keys), partitionID)
+}
+```
+
+### When Hooks Fire
+
+**Node Dies:**
+```
+Before: partition-5 → Node 1 (primary), Node 2 (replica), Node 3 (replica)
+Node 1 dies ❌
+After:  partition-5 → Node 2 (NEW primary), Node 3 (replica), Node 4 (NEW replica)
+
+Hook fires on Node 4:
+  partitionID: "partition-5"
+  copyFrom: &Node{ID: "node-2", IP: ":8081"}  ← Copy from here!
+  copyTo: &Node{ID: "node-4", IP: ":8083"}    ← That's me!
+```
+
+**Node Joins:**
+```
+3 nodes → 4 nodes join → Partitions rebalanced
+
+Hook fires multiple times for affected partitions:
+  - partition-3 moves to Node 4 → Copy from Node 1
+  - partition-7 moves to Node 4 → Copy from Node 2
+  - partition-12 moves to Node 4 → Copy from Node 3
+```
+
+**Key Points:**
+- ✅ Hook fires on ALL nodes, but only the target node acts
+- ✅ `copyFrom` is always a live node with the data
+- ✅ `copyTo` is the node that needs the data
+- ✅ Hook runs in goroutine (non-blocking)
+- ✅ With RF≥2, you never lose data (replicas have copies)
+
+## Starting a 3-Node Cluster
+
+### Node 1 (Bootstrap)
+```bash
+NODE_ID=node-1 \
+NODE_NAME=Server-1 \
+HTTP_ADDR=:8080 \
+RAFT_ADDR=127.0.0.1:9001 \
+BOOTSTRAP=true \
+DATA_DIR=./data/node1 \
+go run main.go
+```
+
+### Node 2
+```bash
+NODE_ID=node-2 \
+NODE_NAME=Server-2 \
+HTTP_ADDR=:8081 \
+RAFT_ADDR=127.0.0.1:9002 \
+JOIN_ADDR=localhost:8080 \
+DATA_DIR=./data/node2 \
+go run main.go
+```
+
+### Node 3
+```bash
+NODE_ID=node-3 \
+NODE_NAME=Server-3 \
+HTTP_ADDR=:8082 \
+RAFT_ADDR=127.0.0.1:9003 \
+JOIN_ADDR=localhost:8080 \
+DATA_DIR=./data/node3 \
+go run main.go
+```
+
+## HTTP API Endpoints
+
+ClusterKit provides built-in HTTP endpoints:
+
+```bash
+# Cluster info
+GET /cluster
+
+# Partitions
+GET /partitions
+GET /partitions/stats
+GET /partitions/key?key=<key>
+
+# Consensus
+GET /consensus/leader
+GET /consensus/stats
+
+# Health
+GET /health
+GET /health/detailed
+GET /metrics
+```
+
+## Configuration Options
+
+```go
+type Options struct {
+    NodeID       string   // Unique node identifier
+    NodeName     string   // Human-readable name
+    HTTPAddr     string   // HTTP server address (e.g., ":8080")
+    RaftAddr     string   // Raft address (e.g., "127.0.0.1:9001")
+    JoinAddr     string   // Address of node to join (empty for bootstrap)
+    Bootstrap    bool     // True for first node
+    DataDir      string   // Directory for Raft data
+    Config       *Config  // Cluster configuration
+}
+
+type Config struct {
+    ClusterName       string  // Cluster identifier
+    PartitionCount    int     // Number of partitions (default: 16)
+    ReplicationFactor int     // Number of replicas (default: 3)
+}
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────┐
+│         Your Application                │
+│  (HTTP Server, gRPC, Database, etc.)    │
+├─────────────────────────────────────────┤
+│           ClusterKit Library            │
+│  ┌──────────┬──────────┬──────────┐    │
+│  │Partition │   Raft   │   HTTP   │    │
+│  │ Manager  │Consensus │   API    │    │
+│  └──────────┴──────────┴──────────┘    │
+└─────────────────────────────────────────┘
+         │         │         │
+    ┌────┴────┬────┴────┬────┴────┐
+    │ Node 1  │ Node 2  │ Node 3  │
+    └─────────┴─────────┴─────────┘
+```
+
+## Use Cases
+
+ClusterKit is perfect for building:
+
+### ✅ **Distributed Databases**
+```go
+// Your new database "MyDB"
+ck := clusterkit.NewClusterKit(opts)
+partition, _ := ck.GetPartition("users:123")
+primary := ck.GetPrimary(partition)
+// Store data on primary, replicate to replicas
+```
+
+### ✅ **Distributed Caches**
+```go
+// Your new cache "FastCache"
+ck := clusterkit.NewClusterKit(opts)
+partition, _ := ck.GetPartition("session:abc")
+if ck.IsPrimary(partition) {
+    cache.Set(key, value)
+}
+```
+
+### ✅ **Distributed Queues**
+```go
+// Your new queue "ReliableQ"
+ck := clusterkit.NewClusterKit(opts)
+partition, _ := ck.GetPartition("queue:orders")
+primary := ck.GetPrimary(partition)
+// Send messages to primary
+```
+
+### ✅ **Distributed File Systems**
+```go
+// Your new FS "CloudFS"
+ck := clusterkit.NewClusterKit(opts)
+partition, _ := ck.GetPartition("file:document.pdf")
+nodes := ck.GetNodes(partition)
+// Store file chunks across nodes
+```
+
+### ✅ **Distributed Key-Value Stores**
+```go
+// Your new KV store "FastKV"
+ck := clusterkit.NewClusterKit(opts)
+// Add persistent storage (RocksDB, BadgerDB)
+// Add quorum writes
+// Add conflict resolution
+```
+
+**Perfect for:**
+- 🎓 Learning distributed systems
+- 🚀 Startups building infrastructure
+- 🔬 Research projects
+- 💡 Side projects
+- 🏢 Custom distributed solutions
+
+## Why ClusterKit?
+
+**Before ClusterKit:**
+```go
+// Complex: Manual partition calculation, node discovery, consensus...
+hash := md5.Sum([]byte(key))
+partitionID := int(hash) % 16
+nodes := lookupNodes(partitionID)  // How?
+primary := electPrimary(nodes)      // How?
+replicas := getReplicas(nodes)      // How?
+// ... 100+ lines of cluster management code
+```
+
+**With ClusterKit:**
+```go
+// Simple: Just ask ClusterKit!
+partition, _ := ck.GetPartition(key)
+primary := ck.GetPrimary(partition)
+replicas := ck.GetReplicas(partition)
+// Done! Focus on your business logic.
+```
+
+## Production Checklist
+
+### ClusterKit Configuration
+- ✅ **Minimal Config** - Only NodeID and HTTPAddr required!
+- ✅ Set partition count (default: 16, increase for large clusters)
+- ✅ Set replication factor ≥ 3 for high availability (default: 3)
+- ✅ Use persistent storage for DataDir
+- ✅ Override RaftAddr for multi-host deployments
+
+### Your Application
+- ✅ Implement durable storage (RocksDB, BadgerDB, PostgreSQL, etc.)
+- ✅ Register `OnPartitionChange` hook for automatic data migration
+- ✅ Implement proper error handling and retries
+- ✅ Add batching for replication (don't send one key at a time)
+- ✅ Add rate limiting for migrations
+- ✅ Verify data after migration
+- ✅ Clean up old data after successful migration
+- ✅ Add metrics and monitoring
+- ✅ Test failure scenarios (kill nodes, network partitions)
+
+### Deployment
+- ✅ Use Docker Compose for local/staging (see [Docker Setup](./example/DOCKER.md))
+- ✅ Use Kubernetes for production
+- ✅ Set up health checks and monitoring
+- ✅ Configure proper resource limits
+- ✅ Enable TLS for production traffic
+
+## Building a Client SDK for Your Application
+
+If you're building a distributed service (KV store, cache, queue, etc.) using ClusterKit, you'll want to provide a **client SDK** for developers to use your service.
+
+### Architecture
+
+```
+Developer's App          Your Service (ClusterKit)
+┌─────────────┐         ┌──────────────────────┐
+│             │         │  Node 1  Node 2      │
+│  App Code   │         │  Node 3  Node 4      │
+│      ↓      │  SDK    │                      │
+│  YourSDK    │ ──────→ │  (ClusterKit inside) │
+│  (Client)   │  HTTP   │                      │
+└─────────────┘         └──────────────────────┘
+```
+
+### Two Client Options
+
+#### 1. Simple Client (Round-Robin)
+```go
+// Simple client - sends to any node, node forwards to primary
+type SimpleClient struct {
+    nodes       []string
+    currentNode int
+}
+
+func (c *SimpleClient) Set(key, value string) error {
+    node := c.nodes[c.currentNode]
+    c.currentNode = (c.currentNode + 1) % len(c.nodes)
+    
+    // Send to any node, it will forward internally
+    return httpPost(node, "/kv/set", key, value)
+}
+```
+
+**Pros:** Simple, no topology knowledge needed  
+**Cons:** Extra network hop (client→node→primary)
+
+#### 2. Smart Client (Production-Grade) ⭐
+
+```go
+// Smart client - fetches topology, routes directly to primary
+type SmartClient struct {
+    topology    *Topology
+    hashConfig  HashConfig
+}
+
+func (c *SmartClient) Set(key, value string) error {
+    // 1. Calculate partition using server's hash function
+    partition := c.calculatePartition(key)
+    
+    // 2. Get primary node from topology
+    primary := c.topology.Partitions[partition].PrimaryNode
+    
+    // 3. Send directly to primary (no forwarding!)
+    return httpPost(primary, "/kv/set", key, value)
+}
+
+func (c *SmartClient) SetWithReplication(key, value string, quorum int) error {
+    partition := c.calculatePartition(key)
+    nodes := c.topology.Partitions[partition] // primary + replicas
+    
+    // Send to all nodes in parallel
+    results := parallelPost(nodes, "/kv/replicate", key, value)
+    
+    // Wait for quorum
+    if countSuccess(results) >= quorum {
+        return nil
+    }
+    return errors.New("quorum not reached")
+}
+```
+
+**Pros:** Direct routing, 33-50% faster, quorum support  
+**Cons:** Needs topology management
+
+### Key Features for Production Client
+
+1. **Fetch Topology from ClusterKit**
+```go
+// GET http://node1:8080/cluster
+{
+  "cluster": {
+    "nodes": [...],
+    "partition_map": {...}
+  },
+  "hash_config": {
+    "algorithm": "fnv1a",
+    "seed": 0,
+    "modulo": 16,
+    "format": "partition-%d"
+  }
+}
+```
+
+2. **Use Server's Hash Function**
+```go
+// Client uses exact same hash as server
+func (c *SmartClient) calculatePartition(key string) string {
+    switch c.hashConfig.Algorithm {
+    case "fnv1a":
+        h := fnv.New32a()
+        h.Write([]byte(key))
+        num := int(h.Sum32()) % c.hashConfig.Modulo
+        return fmt.Sprintf(c.hashConfig.Format, num)
+    }
+}
+```
+
+3. **Smart Polling with ETag**
+```go
+// Check every 30s if topology changed
+func (c *SmartClient) refreshLoop() {
+    ticker := time.NewTicker(30 * time.Second)
+    for range ticker.C {
+        // Lightweight HEAD request
+        resp := http.Head("/cluster")
+        if resp.Header.Get("ETag") != c.currentETag {
+            c.fetchTopology() // Only fetch if changed!
         }
     }
 }
 ```
 
-#### `GetPrimaryNodeForKey(key string) (*Node, error)`
-
-Get only the primary node for a key.
-
+4. **Quorum Writes for Consistency**
 ```go
-primary, err := ck.GetPrimaryNodeForKey("user:123")
-// Returns: {ID: "node-2", Name: "Server-2", IP: ":8081", Status: "active"}
-```
-
-#### `GetReplicaNodesForKey(key string) ([]Node, error)`
-
-Get only the replica nodes for a key.
-
-```go
-replicas, err := ck.GetReplicaNodesForKey("user:123")
-// Returns: [{ID: "node-1", ...}, {ID: "node-3", ...}]
-```
-
-#### `GetMyNodeInfo() Node`
-
-Get information about the current node.
-
-```go
-me := ck.GetMyNodeInfo()
-// Returns: {ID: "node-1", Name: "Server-1", IP: ":8080", Status: "active"}
-```
-
----
-
-### Advanced Partition Methods
-
-#### `GetPartitionForKey(key string) (*Partition, error)`
-
-Get the partition object for a key (advanced usage).
-
-```go
-partition, err := ck.GetPartitionForKey("user:123")
-// Returns: {ID: "partition-5", PrimaryNode: "node-2", ReplicaNodes: ["node-1", "node-3"]}
-```
-
-#### `CreatePartitions() error`
-
-Manually create partitions (auto-created on bootstrap by default).
-
-```go
-if ck.GetConsensusManager().IsLeader() {
-    err := ck.CreatePartitions()
+// Write to primary + replicas, wait for N acknowledgments
+func (c *SmartClient) SetWithReplication(key, value string, quorum int) error {
+    partition := c.calculatePartition(key)
+    nodes := c.topology.GetNodes(partition)
+    
+    // Parallel writes
+    var wg sync.WaitGroup
+    successChan := make(chan bool, len(nodes))
+    
+    for _, node := range nodes {
+        wg.Add(1)
+        go func(n string) {
+            defer wg.Done()
+            if httpPost(n, key, value) == nil {
+                successChan <- true
+            }
+        }(node)
+    }
+    
+    wg.Wait()
+    close(successChan)
+    
+    if len(successChan) >= quorum {
+        return nil
+    }
+    return errors.New("quorum not reached")
 }
 ```
-
-#### `ListPartitions() []*Partition`
-
-Get all partitions in the cluster.
-
-```go
-partitions := ck.ListPartitions()
-for _, p := range partitions {
-    fmt.Printf("Partition %s: Primary=%s\n", p.ID, p.PrimaryNode)
-}
-```
-
-#### `GetPartitionStats() *PartitionStats`
-
-Get partition distribution statistics.
-
-```go
-stats := ck.GetPartitionStats()
-// Returns: {TotalPartitions: 16, PartitionsPerNode: {...}, ReplicasPerNode: {...}}
-```
-
-#### `RebalancePartitions() error`
-
-Rebalance partitions across nodes (leader only).
-
-```go
-if ck.GetConsensusManager().IsLeader() {
-    err := ck.RebalancePartitions()
-}
-```
-
----
-
-### Cluster Information
-
-#### `GetCluster() *Cluster`
-
-Get current cluster state.
-
-```go
-cluster := ck.GetCluster()
-fmt.Printf("Cluster: %s, Nodes: %d\n", cluster.Name, len(cluster.Nodes))
-```
-
----
-
-### Consensus & Leadership
-
-#### `GetConsensusManager() *ConsensusManager`
-
-Get the consensus manager for leader operations.
-
-```go
-cm := ck.GetConsensusManager()
-```
-
-#### `IsLeader() bool`
-
-Check if current node is the Raft leader.
-
-```go
-if cm.IsLeader() {
-    // Perform leader-only operations
-    ck.CreatePartitions()
-}
-```
-
-#### `GetLeader() (*LeaderInfo, error)`
-
-Get current leader information.
-
-```go
-leader, err := cm.GetLeader()
-// Returns: {LeaderID: "node-1", LeaderName: "Server-1", LeaderIP: ":8080", Term: 5}
-```
-
-#### `WaitForLeader(timeout time.Duration) error`
-
-Wait for leader election to complete.
-
-```go
-err := cm.WaitForLeader(10 * time.Second)
-```
-
-#### `GetStats() *ConsensusStats`
-
-Get Raft consensus statistics.
-
-```go
-stats := cm.GetStats()
-// Returns: {State: "Leader", Term: 5, LastLogIndex: 42, CommitIndex: 42, ...}
-```
-
----
 
 ### Complete Example
 
-```go
-package main
+See [client/](./client) directory for a complete production-grade client SDK implementation with:
 
-import (
-    "fmt"
-    "log"
-    "time"
-    "github.com/skshohagmiah/clusterkit"
-)
+- ✅ Simple round-robin client
+- ✅ Smart client with topology awareness
+- ✅ Server hash function sync
+- ✅ ETag-based smart polling (90% less bandwidth)
+- ✅ Quorum writes
+- ✅ Replica reads
+- ✅ Auto-failover on errors
+- ✅ Scales to millions of clients
 
-func main() {
-    // Initialize ClusterKit
-    ck, err := clusterkit.NewClusterKit(clusterkit.Options{
-        NodeID:    "node-1",
-        NodeName:  "Server-1",
-        HTTPAddr:  ":8080",
-        RaftAddr:  "127.0.0.1:9001",
-        Bootstrap: true,
-        DataDir:   "./data/node1",
-        Config: &clusterkit.Config{
-            ClusterName:       "my-app",
-            PartitionCount:    16,
-            ReplicationFactor: 3,
-        },
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
+**Read the [Client SDK Documentation](./client/README.md) for details!**
 
-    // Start ClusterKit
-    if err := ck.Start(); err != nil {
-        log.Fatal(err)
-    }
-    defer ck.Stop()
+## Examples
 
-    // Wait for leader election
-    cm := ck.GetConsensusManager()
-    cm.WaitForLeader(10 * time.Second)
+- [Distributed KV Store](./example) - Complete working example with server
+- [Client SDK](./client) - Production-grade client SDK implementation
+- [Docker Setup](./example/DOCKER.md) - Run 3-node cluster with Docker Compose
+- [Local Demo](./example/demo.sh) - Comprehensive local testing script
 
-    // Create partitions (leader only)
-    if cm.IsLeader() {
-        ck.CreatePartitions()
-    }
+## Contributing
 
-    // Use ClusterKit to route data
-    key := "user:123"
-    
-    // Get partition info
-    partition, _ := ck.GetPartitionForKey(key)
-    fmt.Printf("Key %s belongs to partition %s\n", key, partition.ID)
-    
-    // Check if this node should handle the key
-    isPrimary, _ := ck.IsPrimaryForKey(key)
-    if isPrimary {
-        // Write to your database
-        myDB.Write(key, data)
-        
-        // Replicate to replica nodes
-        replicas, _ := ck.GetReplicaNodes(key)
-        for _, replica := range replicas {
-            sendToNode(replica, key, data)
-        }
-    } else {
-        // Forward to primary
-        primary, _ := ck.GetPrimaryNode(key)
-        forwardTo(primary, key, data)
-    }
-}
-```
+Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 
-## 📖 Examples
+## License
 
-- **[Basic Example](./example)** - Simple multi-node cluster setup
-- **[Partitions Demo](./example/partitions-demo)** - Complete partition management example
+MIT License - see [LICENSE](LICENSE) for details.
 
-## 🐳 Dockerizing Your Application with ClusterKit
+## What's New in v2.0
 
-ClusterKit is a **library**, so you dockerize **your application** that uses ClusterKit.
+### 🚀 Simplified API (70% Less Configuration)
+- **Before:** 9 required fields
+- **After:** Only 2 required fields!
+- Auto-generates NodeName, auto-calculates RaftAddr, smart defaults
 
-### Example: Your Application Dockerfile
+### 🔄 Automatic Partition Rebalancing
+- Detects when nodes join
+- Recalculates partition assignments automatically
+- Triggers OnPartitionChange hooks
+- Zero manual intervention required
 
-```dockerfile
-FROM golang:1.21-alpine AS builder
-WORKDIR /app
+### 📊 Production-Grade Client SDK
+- Simple client (round-robin)
+- Smart client (direct routing, 33-50% faster)
+- Server hash function sync
+- ETag-based polling (90% less bandwidth)
+- Quorum writes for strong consistency
 
-# Copy your app
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
+### 🐳 Docker Ready
+- Complete Docker Compose setup
+- Minimal configuration
+- Health checks included
+- Production-ready
 
-# Build your app (which uses ClusterKit)
-RUN go build -o myapp .
+## Support
 
-FROM alpine:latest
-WORKDIR /root/
-COPY --from=builder /app/myapp .
-
-# Expose your app's ports
-EXPOSE 8080 9001
-
-CMD ["./myapp"]
-```
-
-### Example: Your docker-compose.yml
-
-```yaml
-version: '3.8'
-
-services:
-  app-node1:
-    build: .
-    environment:
-      - NODE_ID=node-1
-      - NODE_NAME=Server-1
-      - HTTP_ADDR=:8080
-      - RAFT_ADDR=app-node1:9001
-      - BOOTSTRAP=true
-    ports:
-      - "8080:8080"
-    volumes:
-      - app1-data:/data
-
-  app-node2:
-    build: .
-    environment:
-      - NODE_ID=node-2
-      - NODE_NAME=Server-2
-      - HTTP_ADDR=:8080
-      - RAFT_ADDR=app-node2:9001
-      - JOIN_ADDR=app-node1:8080
-    ports:
-      - "8081:8080"
-    volumes:
-      - app2-data:/data
-    depends_on:
-      - app-node1
-
-volumes:
-  app1-data:
-  app2-data:
-```
-
-### Demo Example (Reference)
-
-The included `example/docker/docker-compose.yml` shows a working example:
-
-```yaml
-version: '3.8'
-
-services:
-  node1:
-    build: .
-    environment:
-      - NODE_ID=node-1
-      - NODE_NAME=Server-1
-      - HTTP_ADDR=:8080
-      - RAFT_ADDR=node1:9001
-      - BOOTSTRAP=true
-    ports:
-      - "8080:8080"
-      - "9001:9001"
-    volumes:
-      - node1-data:/data
-    networks:
-      - clusterkit-network
-
-  node2:
-    build: .
-    environment:
-      - NODE_ID=node-2
-      - NODE_NAME=Server-2
-      - HTTP_ADDR=:8080
-      - RAFT_ADDR=node2:9001
-      - JOIN_ADDR=node1:8080
-    ports:
-      - "8081:8080"
-      - "9002:9001"
-    volumes:
-      - node2-data:/data
-    networks:
-      - clusterkit-network
-    depends_on:
-      - node1
-
-  # node3 similar...
-```
-
-### Custom Dockerfile
-
-```dockerfile
-FROM golang:1.21-alpine AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o clusterkit-app ./example/main.go
-
-FROM alpine:latest
-WORKDIR /root/
-COPY --from=builder /app/clusterkit-app .
-EXPOSE 8080 9001
-CMD ["./clusterkit-app"]
-```
-
-### Kubernetes Deployment
-
-For Kubernetes, use StatefulSets with persistent volumes:
-
-```yaml
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: clusterkit
-spec:
-  serviceName: clusterkit
-  replicas: 3
-  selector:
-    matchLabels:
-      app: clusterkit
-  template:
-    metadata:
-      labels:
-        app: clusterkit
-    spec:
-      containers:
-      - name: clusterkit
-        image: your-registry/clusterkit:latest
-        ports:
-        - containerPort: 8080
-          name: http
-        - containerPort: 9001
-          name: raft
-        env:
-        - name: NODE_ID
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        - name: NODE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        - name: HTTP_ADDR
-          value: ":8080"
-        - name: RAFT_ADDR
-          value: "$(NODE_NAME).clusterkit:9001"
-        - name: BOOTSTRAP
-          value: "false"
-        - name: JOIN_ADDR
-          value: "clusterkit-0.clusterkit:8080"
-        volumeMounts:
-        - name: data
-          mountPath: /data
-  volumeClaimTemplates:
-  - metadata:
-      name: data
-    spec:
-      accessModes: [ "ReadWriteOnce" ]
-      resources:
-        requests:
-          storage: 10Gi
-```
-
-### Environment Variables
-
-| Variable | Description | Example | Required |
-|----------|-------------|---------|----------|
-| `NODE_ID` | Unique node identifier | `node-1` | Yes |
-| `NODE_NAME` | Human-readable name | `Server-1` | Yes |
-| `HTTP_ADDR` | HTTP listen address | `:8080` | Yes |
-| `RAFT_ADDR` | Raft bind address | `node1:9001` | Yes |
-| `BOOTSTRAP` | Bootstrap first node | `true` | First node only |
-| `JOIN_ADDR` | Address to join | `node1:8080` | Joining nodes |
-| `DATA_DIR` | Data directory | `/data` | Yes |
-
-## 📚 Documentation
-
-- **[PARTITIONS.md](./PARTITIONS.md)** - Detailed partition management guide
-
-## 🤝 Contributing
-
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on:
-- Reporting bugs
-- Suggesting features
-- Submitting pull requests
-- Code style and testing
-
-## 📝 License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-Copyright (c) 2024 Shohag Miah
-
-## 🌟 Support
-
-If you find ClusterKit useful, please consider:
-- ⭐ Starring the repository
-- 🐛 Reporting bugs
-- 💡 Suggesting features
-- 🤝 Contributing code
-- 📢 Sharing with others
-
-## 📞 Contact
-
-- **GitHub Issues**: For bugs and feature requests
-- **GitHub Discussions**: For questions and ideas
-- **Email**: [your-email@example.com]
+- 📖 [Documentation](https://github.com/skshohagmiah/clusterkit/wiki)
+- 📘 [Simplified API Guide](./SIMPLIFIED_API.md)
+- 🐛 [Issue Tracker](https://github.com/skshohagmiah/clusterkit/issues)
+- 💬 [Discussions](https://github.com/skshohagmiah/clusterkit/discussions)
 
 ---
 
-**Built with ❤️ using Go and HashiCorp Raft**
+**Made with ❤️ for developers who want simple, production-ready cluster coordination**
+
+**ClusterKit: The easiest way to build distributed systems in Go** 🚀

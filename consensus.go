@@ -100,7 +100,12 @@ func (f *clusterFSM) applyAddNode(data interface{}) error {
 
 	// Add new node
 	f.ck.cluster.Nodes = append(f.ck.cluster.Nodes, node)
+	f.ck.cluster.rebuildNodeMap() // Rebuild map for O(1) lookups
 	fmt.Printf("✓ Added node: %s\n", node.ID)
+	
+	// Trigger automatic partition rebalancing
+	go f.ck.triggerRebalance()
+	
 	return nil
 }
 
@@ -114,6 +119,7 @@ func (f *clusterFSM) applyRemoveNode(data interface{}) error {
 	for i, node := range f.ck.cluster.Nodes {
 		if node.ID == nodeID {
 			f.ck.cluster.Nodes = append(f.ck.cluster.Nodes[:i], f.ck.cluster.Nodes[i+1:]...)
+			f.ck.cluster.rebuildNodeMap() // Rebuild map for O(1) lookups
 			fmt.Printf("✓ Removed node: %s\n", nodeID)
 			return nil
 		}
@@ -161,6 +167,10 @@ func (f *clusterFSM) applyCreatePartitions(data interface{}) error {
 	}
 
 	fmt.Printf("✓ Created %d partitions\n", len(f.ck.cluster.PartitionMap.Partitions))
+	
+	// Notify hooks about partition changes
+	f.ck.hookManager.checkPartitionChanges(f.ck.cluster.PartitionMap.Partitions, f.ck.cluster)
+	
 	return nil
 }
 
@@ -197,6 +207,10 @@ func (f *clusterFSM) applyRebalancePartitions(data interface{}) error {
 	}
 
 	fmt.Printf("✓ Rebalanced partitions\n")
+	
+	// Notify hooks about partition changes
+	f.ck.hookManager.checkPartitionChanges(f.ck.cluster.PartitionMap.Partitions, f.ck.cluster)
+	
 	return nil
 }
 
@@ -318,7 +332,14 @@ func (cm *ConsensusManager) Start() error {
 
 	// Setup Raft configuration
 	config := raft.DefaultConfig()
-	config.LocalID = raft.ServerID(cm.ck.cluster.ID)
+	// Use the node ID, not the cluster ID
+	var nodeID string
+	if len(cm.ck.cluster.Nodes) > 0 {
+		nodeID = cm.ck.cluster.Nodes[0].ID
+	} else {
+		nodeID = cm.ck.cluster.ID // Fallback
+	}
+	config.LocalID = raft.ServerID(nodeID)
 
 	// Setup Raft communication
 	addr, err := net.ResolveTCPAddr("tcp", cm.raftBind)

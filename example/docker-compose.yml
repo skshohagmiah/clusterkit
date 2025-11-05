@@ -1,0 +1,94 @@
+version: '3.8'
+
+services:
+  node1:
+    build:
+      context: ..
+      dockerfile: example/Dockerfile
+    container_name: clusterkit-node1
+    hostname: node1
+    environment:
+      # Only NODE_ID is required! Everything else is auto-calculated
+      - NODE_ID=node-1
+      # Optional: Override Raft address for Docker networking
+      - RAFT_ADDR=node1:9001
+    ports:
+      - "8080:8080"   # ClusterKit HTTP (auto: 8080)
+      - "9080:9080"   # KV Store HTTP (auto: 9080)
+      - "9001:9001"   # Raft (auto: 9001)
+    volumes:
+      - node1-data:/data
+    networks:
+      - clusterkit-net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  node2:
+    build:
+      context: ..
+      dockerfile: example/Dockerfile
+    container_name: clusterkit-node2
+    hostname: node2
+    environment:
+      # Only NODE_ID and JOIN_ADDR required!
+      - NODE_ID=node-2
+      - JOIN_ADDR=node1:8080
+      # Optional: Override Raft address for Docker networking
+      - RAFT_ADDR=node2:9001
+    ports:
+      - "8081:8080"   # ClusterKit HTTP (auto: 8081, mapped to 8080)
+      - "9081:9080"   # KV Store HTTP (auto: 9081, mapped to 9080)
+      - "9002:9001"   # Raft (auto: 9002, mapped to 9001)
+    volumes:
+      - node2-data:/data
+    networks:
+      - clusterkit-net
+    depends_on:
+      node1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  node3:
+    build:
+      context: ..
+      dockerfile: example/Dockerfile
+    container_name: clusterkit-node3
+    hostname: node3
+    environment:
+      # Only NODE_ID and JOIN_ADDR required!
+      - NODE_ID=node-3
+      - JOIN_ADDR=node1:8080
+      # Optional: Override Raft address for Docker networking
+      - RAFT_ADDR=node3:9001
+    ports:
+      - "8082:8080"   # ClusterKit HTTP (auto: 8082, mapped to 8080)
+      - "9082:9080"   # KV Store HTTP (auto: 9082, mapped to 9080)
+      - "9003:9001"   # Raft (auto: 9003, mapped to 9001)
+    volumes:
+      - node3-data:/data
+    networks:
+      - clusterkit-net
+    depends_on:
+      node2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  clusterkit-net:
+    driver: bridge
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
