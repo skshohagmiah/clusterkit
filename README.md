@@ -38,19 +38,6 @@ ClusterKit provides **cluster coordination** (nodes, partitions, consensus) whil
 - 🔧 Data migration logic
 - 🔧 Business logic
 
-## Why ClusterKit?
-
-ClusterKit is designed for developers who need **cluster coordination without the complexity**. Instead of managing consensus, partitioning, and node discovery yourself, ClusterKit handles it all while letting you focus on your application logic.
-
-### Key Design Principles
-
-- **Minimal Configuration** - Only 2 required fields (NodeID, HTTPAddr)
-- **Smart Defaults** - Production-ready settings out of the box
-- **Protocol Agnostic** - Use HTTP, gRPC, or any protocol for your data layer
-- **Bring Your Own Storage** - Works with any database (PostgreSQL, Redis, RocksDB, etc.)
-- **Automatic Rebalancing** - Handles partition migration when nodes join/leave
-- **Production Ready** - Built on HashiCorp Raft for strong consistency
-
 ## Installation
 
 ```bash
