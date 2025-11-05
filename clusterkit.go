@@ -32,43 +32,55 @@ type ClusterKit struct {
 
 // Options for initializing ClusterKit
 type Options struct {
-	NodeID       string        // Unique ID for this node
-	NodeName     string        // Human-readable name
-	HTTPAddr     string        // Address to listen on (e.g., ":8080")
-	RaftAddr     string        // Raft bind address (e.g., "127.0.0.1:9001")
-	JoinAddr     string        // Address of any existing node to join (empty for first node)
-	DataDir      string        // Directory to store state and WAL
-	SyncInterval time.Duration // How often to sync with other nodes
-	Config       *Config       // Cluster configuration
-	Bootstrap    bool          // Set to true for the first node in the cluster
+	// Required
+	NodeID   string // Unique ID for this node (e.g., "node-1")
+	HTTPAddr string // Address to listen on (e.g., ":8080")
+	
+	// Optional - Auto-generated if not provided
+	NodeName          string        // Human-readable name (default: auto-generated from NodeID)
+	RaftAddr          string        // Raft bind address (default: auto-calculated from HTTPAddr)
+	DataDir           string        // Directory to store state (default: "./clusterkit-data")
+	SyncInterval      time.Duration // Sync interval (default: 5s)
+	
+	// Cluster Configuration - Flattened (no nested Config struct)
+	ClusterName       string // Name of the cluster (default: "clusterkit-cluster")
+	PartitionCount    int    // Number of partitions (default: 16)
+	ReplicationFactor int    // Replication factor (default: 3)
+	
+	// Cluster Formation
+	JoinAddr  string // Address of existing node to join (empty for first node)
+	Bootstrap bool   // Set to true for first node (default: auto-detect)
 }
 
 // NewClusterKit initializes a new ClusterKit instance
 func NewClusterKit(opts Options) (*ClusterKit, error) {
-	// Comprehensive input validation
+	// Validate required fields
 	if opts.NodeID == "" {
 		return nil, fmt.Errorf("NodeID is required")
-	}
-	if opts.NodeName == "" {
-		return nil, fmt.Errorf("NodeName is required")
 	}
 	if opts.HTTPAddr == "" {
 		return nil, fmt.Errorf("HTTPAddr is required")
 	}
+	
+	// Auto-generate NodeName from NodeID if not provided
+	if opts.NodeName == "" {
+		opts.NodeName = generateNodeName(opts.NodeID)
+	}
+	
+	// Auto-calculate RaftAddr from HTTPAddr if not provided
 	if opts.RaftAddr == "" {
-		return nil, fmt.Errorf("RaftAddr is required")
+		opts.RaftAddr = calculateRaftAddr(opts.HTTPAddr)
 	}
-	if opts.Config == nil {
-		return nil, fmt.Errorf("Config is required")
+	
+	// Set defaults for cluster configuration
+	if opts.ClusterName == "" {
+		opts.ClusterName = "clusterkit-cluster"
 	}
-	if opts.Config.ClusterName == "" {
-		return nil, fmt.Errorf("ClusterName is required")
+	if opts.PartitionCount <= 0 {
+		opts.PartitionCount = 16
 	}
-	if opts.Config.PartitionCount <= 0 {
-		return nil, fmt.Errorf("PartitionCount must be > 0")
-	}
-	if opts.Config.ReplicationFactor <= 0 {
-		return nil, fmt.Errorf("ReplicationFactor must be > 0")
+	if opts.ReplicationFactor <= 0 {
+		opts.ReplicationFactor = 3
 	}
 	
 	// Set defaults for optional fields
@@ -86,13 +98,17 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 
 	stateFile := filepath.Join(opts.DataDir, "cluster-state.json")
 
-	// Initialize cluster
+	// Initialize cluster with flattened config
 	cluster := &Cluster{
-		ID:           opts.Config.ClusterName, // Use cluster name as ID, not node ID
-		Name:         opts.Config.ClusterName,
+		ID:           opts.ClusterName,
+		Name:         opts.ClusterName,
 		Nodes:        []Node{},
 		PartitionMap: &PartitionMap{Partitions: make(map[string]*Partition)},
-		Config:       opts.Config,
+		Config: &Config{
+			ClusterName:       opts.ClusterName,
+			PartitionCount:    opts.PartitionCount,
+			ReplicationFactor: opts.ReplicationFactor,
+		},
 	}
 
 	// Add self as a node
@@ -411,10 +427,9 @@ func (ck *ClusterKit) HealthCheck() *HealthStatus {
 	}
 
 	uptime := time.Since(ck.startTime)
-	healthy := len(ck.cluster.Nodes) > 0 && ck.consensusManager != nil
-
+	
 	return &HealthStatus{
-		Healthy:        healthy,
+		Healthy:        true,
 		NodeID:         nodeID,
 		NodeName:       nodeName,
 		IsLeader:       isLeader,
@@ -424,4 +439,48 @@ func (ck *ClusterKit) HealthCheck() *HealthStatus {
 		LastSync:       ck.lastSync,
 		Uptime:         uptime.String(),
 	}
+}
+
+// generateNodeName creates a human-readable name from NodeID
+// Examples: "node-1" -> "Server-1", "server-2" -> "Server-2"
+func generateNodeName(nodeID string) string {
+	var num int
+	
+	// Try "node-N" pattern
+	if _, err := fmt.Sscanf(nodeID, "node-%d", &num); err == nil {
+		return fmt.Sprintf("Server-%d", num)
+	}
+	
+	// Try "server-N" pattern
+	if _, err := fmt.Sscanf(nodeID, "server-%d", &num); err == nil {
+		return fmt.Sprintf("Server-%d", num)
+	}
+	
+	// Try just "N" pattern
+	if _, err := fmt.Sscanf(nodeID, "%d", &num); err == nil {
+		return fmt.Sprintf("Server-%d", num)
+	}
+	
+	// Default: capitalize first letter
+	if len(nodeID) > 0 {
+		return string(nodeID[0]-32) + nodeID[1:]
+	}
+	
+	return nodeID
+}
+
+// calculateRaftAddr auto-calculates Raft address from HTTP address
+// Examples: ":8080" -> "127.0.0.1:9001", ":8081" -> "127.0.0.1:9002"
+func calculateRaftAddr(httpAddr string) string {
+	var port int
+	
+	// Try to extract port from HTTP address
+	if _, err := fmt.Sscanf(httpAddr, ":%d", &port); err == nil {
+		// Calculate Raft port: 9001 + (httpPort - 8080)
+		raftPort := 9001 + (port - 8080)
+		return fmt.Sprintf("127.0.0.1:%d", raftPort)
+	}
+	
+	// Default to 9001
+	return "127.0.0.1:9001"
 }

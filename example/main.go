@@ -16,34 +16,56 @@ import (
 )
 
 func main() {
-	// Get node configuration from environment or use defaults
-	nodeID := getEnv("NODE_ID", "node-1")
-	nodeName := getEnv("NODE_NAME", "Server-1")
-	httpAddr := getEnv("HTTP_ADDR", ":8080")
-	raftAddr := getEnv("RAFT_ADDR", "127.0.0.1:9001")
-	dataDir := getEnv("DATA_DIR", "./data")
+	// Simplified configuration - only NODE_ID is required
+	// Everything else is auto-calculated or has sensible defaults
 
-	// Join address - address of any existing node (empty for first node)
+	nodeID := getEnv("NODE_ID", "node-1")
+
+	// Auto-calculate node number from NODE_ID (e.g., "node-1" -> 1)
+	nodeNum := extractNodeNumber(nodeID)
+
+	// Auto-calculate ports based on node number
+	// Node 1: 8080, 9001, 9080
+	// Node 2: 8081, 9002, 9081
+	// Node 3: 8082, 9003, 9082
+	clusterPort := 8080 + nodeNum - 1
+	raftPort := 9001 + nodeNum - 1
+	kvPort := 9080 + nodeNum - 1
+
+	// Get optional overrides
+	httpAddr := getEnv("HTTP_ADDR", fmt.Sprintf(":%d", clusterPort))
+	raftAddr := getEnv("RAFT_ADDR", fmt.Sprintf("127.0.0.1:%d", raftPort))
+	dataDir := getEnv("DATA_DIR", fmt.Sprintf("./data/node%d", nodeNum))
+	nodeName := getEnv("NODE_NAME", fmt.Sprintf("Server-%d", nodeNum))
+
+	// Join address - only needed for non-bootstrap nodes
 	joinAddr := getEnv("JOIN_ADDR", "")
 
-	// Bootstrap flag - set to true for the first node
-	bootstrap := getEnv("BOOTSTRAP", "false") == "true"
+	// Bootstrap flag - auto-detect: true if NODE_ID=node-1 and no JOIN_ADDR
+	bootstrap := nodeID == "node-1" && joinAddr == ""
+	if getEnv("BOOTSTRAP", "") != "" {
+		bootstrap = getEnv("BOOTSTRAP", "false") == "true"
+	}
 
-	// Initialize ClusterKit
+	// Initialize ClusterKit with simplified API
 	ck, err := clusterkit.NewClusterKit(clusterkit.Options{
-		NodeID:       nodeID,
-		NodeName:     nodeName,
-		HTTPAddr:     httpAddr,
-		RaftAddr:     raftAddr,
-		JoinAddr:     joinAddr,
-		Bootstrap:    bootstrap,
-		DataDir:      dataDir,
-		SyncInterval: 5 * time.Second,
-		Config: &clusterkit.Config{
-			ClusterName:       "my-app-cluster",
-			PartitionCount:    16,
-			ReplicationFactor: 3,
-		},
+		// Required
+		NodeID:   nodeID,
+		HTTPAddr: httpAddr,
+		
+		// Optional (will be auto-generated/calculated if not provided)
+		NodeName: nodeName, // Auto-generated from NodeID if empty
+		RaftAddr: raftAddr, // Auto-calculated from HTTPAddr if empty
+		DataDir:  dataDir,
+		
+		// Cluster config (flattened, no nested struct!)
+		ClusterName:       getEnv("CLUSTER_NAME", "my-app-cluster"),
+		PartitionCount:    16,
+		ReplicationFactor: 3,
+		
+		// Cluster formation
+		JoinAddr:  joinAddr,
+		Bootstrap: bootstrap,
 	})
 	if err != nil {
 		log.Fatalf("Failed to initialize ClusterKit: %v", err)
@@ -55,12 +77,16 @@ func main() {
 	}
 
 	fmt.Printf("\n=== Distributed KV Store Started ===\n")
+	fmt.Printf("Node ID: %s\n", nodeID)
 	fmt.Printf("Node Name: %s\n", nodeName)
-	fmt.Printf("HTTP Address: %s\n", httpAddr)
+	fmt.Printf("ClusterKit Port: %d\n", clusterPort)
+	fmt.Printf("KV Store Port: %d\n", kvPort)
+	fmt.Printf("Raft Port: %d\n", raftPort)
 	fmt.Printf("Data Directory: %s\n", dataDir)
+	fmt.Printf("Bootstrap: %v\n", bootstrap)
 	fmt.Printf("====================================\n\n")
 
-	// Start KV store
+	// Start KV store - pass ClusterKit httpAddr, it will calculate KV port
 	kv := NewDistributedKV(ck, httpAddr)
 	kv.Start()
 
@@ -533,4 +559,29 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// extractNodeNumber extracts the numeric part from NODE_ID
+// Examples: "node-1" -> 1, "node-2" -> 2, "server-3" -> 3
+func extractNodeNumber(nodeID string) int {
+	// Try to extract number from common patterns
+	var num int
+
+	// Try "node-N" pattern
+	if _, err := fmt.Sscanf(nodeID, "node-%d", &num); err == nil {
+		return num
+	}
+
+	// Try "server-N" pattern
+	if _, err := fmt.Sscanf(nodeID, "server-%d", &num); err == nil {
+		return num
+	}
+
+	// Try just "N" pattern
+	if _, err := fmt.Sscanf(nodeID, "%d", &num); err == nil {
+		return num
+	}
+
+	// Default to 1 if can't extract
+	return 1
 }

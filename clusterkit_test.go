@@ -6,19 +6,15 @@ import (
 
 // TestNewClusterKit tests the initialization of ClusterKit
 func TestNewClusterKit(t *testing.T) {
-	config := &Config{
+	opts := Options{
+		NodeID:            "test-node-1",
+		NodeName:          "Test Node 1",
+		HTTPAddr:          ":8080",
+		RaftAddr:          "127.0.0.1:9001",
+		DataDir:           "/tmp/clusterkit-test",
 		ClusterName:       "test-cluster",
 		PartitionCount:    8,
 		ReplicationFactor: 2,
-	}
-
-	opts := Options{
-		NodeID:   "test-node-1",
-		NodeName: "Test Node 1",
-		HTTPAddr: ":8080",
-		RaftAddr: "127.0.0.1:9001",
-		DataDir:  "/tmp/clusterkit-test",
-		Config:   config,
 	}
 
 	ck, err := NewClusterKit(opts)
@@ -30,8 +26,8 @@ func TestNewClusterKit(t *testing.T) {
 		t.Fatal("ClusterKit instance is nil")
 	}
 
-	if ck.cluster.ID != config.ClusterName {
-		t.Errorf("Expected cluster ID %s, got %s", config.ClusterName, ck.cluster.ID)
+	if ck.cluster.ID != opts.ClusterName {
+		t.Errorf("Expected cluster ID %s, got %s", opts.ClusterName, ck.cluster.ID)
 	}
 
 	if len(ck.cluster.Nodes) != 1 {
@@ -53,81 +49,14 @@ func TestNewClusterKitValidation(t *testing.T) {
 		{
 			name: "missing NodeID",
 			opts: Options{
-				NodeName: "Test Node",
 				HTTPAddr: ":8080",
-				RaftAddr: "127.0.0.1:9001",
-				Config: &Config{
-					ClusterName:       "test",
-					PartitionCount:    8,
-					ReplicationFactor: 2,
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "missing NodeName",
-			opts: Options{
-				NodeID:   "node-1",
-				HTTPAddr: ":8080",
-				RaftAddr: "127.0.0.1:9001",
-				Config: &Config{
-					ClusterName:       "test",
-					PartitionCount:    8,
-					ReplicationFactor: 2,
-				},
 			},
 			wantErr: true,
 		},
 		{
 			name: "missing HTTPAddr",
 			opts: Options{
-				NodeID:   "node-1",
-				NodeName: "Test Node",
-				RaftAddr: "127.0.0.1:9001",
-				Config: &Config{
-					ClusterName:       "test",
-					PartitionCount:    8,
-					ReplicationFactor: 2,
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "missing RaftAddr",
-			opts: Options{
-				NodeID:   "node-1",
-				NodeName: "Test Node",
-				HTTPAddr: ":8080",
-				Config: &Config{
-					ClusterName:       "test",
-					PartitionCount:    8,
-					ReplicationFactor: 2,
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "nil Config",
-			opts: Options{
-				NodeID:   "node-1",
-				NodeName: "Test Node",
-				HTTPAddr: ":8080",
-				RaftAddr: "127.0.0.1:9001",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid PartitionCount",
-			opts: Options{
-				NodeID:   "node-1",
-				NodeName: "Test Node",
-				HTTPAddr: ":8080",
-				RaftAddr: "127.0.0.1:9001",
-				Config: &Config{
-					ClusterName:       "test",
-					PartitionCount:    0,
-					ReplicationFactor: 2,
-				},
+				NodeID: "node-1",
 			},
 			wantErr: true,
 		},
@@ -135,15 +64,8 @@ func TestNewClusterKitValidation(t *testing.T) {
 			name: "valid configuration",
 			opts: Options{
 				NodeID:   "node-1",
-				NodeName: "Test Node",
 				HTTPAddr: ":8080",
-				RaftAddr: "127.0.0.1:9001",
 				DataDir:  "/tmp/test",
-				Config: &Config{
-					ClusterName:       "test",
-					PartitionCount:    8,
-					ReplicationFactor: 2,
-				},
 			},
 			wantErr: false,
 		},
@@ -161,19 +83,13 @@ func TestNewClusterKitValidation(t *testing.T) {
 
 // TestGetMetrics tests the metrics functionality
 func TestGetMetrics(t *testing.T) {
-	config := &Config{
+	opts := Options{
+		NodeID:            "test-node-1",
+		HTTPAddr:          ":8080",
+		DataDir:           "/tmp/clusterkit-test-metrics",
 		ClusterName:       "test-cluster",
 		PartitionCount:    8,
 		ReplicationFactor: 2,
-	}
-
-	opts := Options{
-		NodeID:   "test-node-1",
-		NodeName: "Test Node 1",
-		HTTPAddr: ":8080",
-		RaftAddr: "127.0.0.1:9001",
-		DataDir:  "/tmp/clusterkit-test-metrics",
-		Config:   config,
 	}
 
 	ck, err := NewClusterKit(opts)
@@ -197,19 +113,13 @@ func TestGetMetrics(t *testing.T) {
 
 // TestHealthCheck tests the health check functionality
 func TestHealthCheck(t *testing.T) {
-	config := &Config{
+	opts := Options{
+		NodeID:            "test-node-1",
+		HTTPAddr:          ":8080",
+		DataDir:           "/tmp/clusterkit-test-health",
 		ClusterName:       "test-cluster",
 		PartitionCount:    8,
 		ReplicationFactor: 2,
-	}
-
-	opts := Options{
-		NodeID:   "test-node-1",
-		NodeName: "Test Node 1",
-		HTTPAddr: ":8080",
-		RaftAddr: "127.0.0.1:9001",
-		DataDir:  "/tmp/clusterkit-test-health",
-		Config:   config,
 	}
 
 	ck, err := NewClusterKit(opts)
@@ -237,19 +147,13 @@ func TestHealthCheck(t *testing.T) {
 
 // TestGetCluster tests getting cluster information
 func TestGetCluster(t *testing.T) {
-	config := &Config{
+	opts := Options{
+		NodeID:            "test-node-1",
+		HTTPAddr:          ":8080",
+		DataDir:           "/tmp/clusterkit-test-cluster",
 		ClusterName:       "test-cluster",
 		PartitionCount:    8,
 		ReplicationFactor: 2,
-	}
-
-	opts := Options{
-		NodeID:   "test-node-1",
-		NodeName: "Test Node 1",
-		HTTPAddr: ":8080",
-		RaftAddr: "127.0.0.1:9001",
-		DataDir:  "/tmp/clusterkit-test-cluster",
-		Config:   config,
 	}
 
 	ck, err := NewClusterKit(opts)
@@ -262,12 +166,12 @@ func TestGetCluster(t *testing.T) {
 		t.Fatal("Cluster is nil")
 	}
 
-	if cluster.ID != config.ClusterName {
-		t.Errorf("Expected cluster ID %s, got %s", config.ClusterName, cluster.ID)
+	if cluster.ID != opts.ClusterName {
+		t.Errorf("Expected cluster ID %s, got %s", opts.ClusterName, cluster.ID)
 	}
 
-	if cluster.Name != config.ClusterName {
-		t.Errorf("Expected cluster name %s, got %s", config.ClusterName, cluster.Name)
+	if cluster.Name != opts.ClusterName {
+		t.Errorf("Expected cluster name %s, got %s", opts.ClusterName, cluster.Name)
 	}
 
 	if len(cluster.Nodes) != 1 {

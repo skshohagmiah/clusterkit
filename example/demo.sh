@@ -54,17 +54,20 @@ sleep 1
 print_header "TEST 1: Cluster Formation"
 
 print_info "Starting Node 1 (bootstrap)..."
-NODE_ID=node-1 NODE_NAME=Server-1 HTTP_ADDR=:8080 RAFT_ADDR=127.0.0.1:9001 BOOTSTRAP=true DATA_DIR=./data/node1 go run main.go > /tmp/node1.log 2>&1 &
+# Only NODE_ID required! Ports auto-calculated: 8080, 9001, 9080
+NODE_ID=node-1 go run main.go > /tmp/node1.log 2>&1 &
 NODE1_PID=$!
 sleep 3
 
 print_info "Starting Node 2 (join)..."
-NODE_ID=node-2 NODE_NAME=Server-2 HTTP_ADDR=:8081 RAFT_ADDR=127.0.0.1:9002 JOIN_ADDR=localhost:8080 DATA_DIR=./data/node2 go run main.go > /tmp/node2.log 2>&1 &
+# Only NODE_ID and JOIN_ADDR required! Ports auto-calculated: 8081, 9002, 9081
+NODE_ID=node-2 JOIN_ADDR=localhost:8080 go run main.go > /tmp/node2.log 2>&1 &
 NODE2_PID=$!
 sleep 2
 
 print_info "Starting Node 3 (join)..."
-NODE_ID=node-3 NODE_NAME=Server-3 HTTP_ADDR=:8082 RAFT_ADDR=127.0.0.1:9003 JOIN_ADDR=localhost:8080 DATA_DIR=./data/node3 go run main.go > /tmp/node3.log 2>&1 &
+# Only NODE_ID and JOIN_ADDR required! Ports auto-calculated: 8082, 9003, 9082
+NODE_ID=node-3 JOIN_ADDR=localhost:8080 go run main.go > /tmp/node3.log 2>&1 &
 NODE3_PID=$!
 
 print_info "Waiting for compilation and cluster formation..."
@@ -221,7 +224,7 @@ fi
 
 # Restart Node 2
 print_info "Restarting Node 2..."
-NODE_ID=node-2 NODE_NAME=Server-2 HTTP_ADDR=:8081 RAFT_ADDR=127.0.0.1:9002 JOIN_ADDR=localhost:8080 DATA_DIR=./data/node2 go run main.go > /tmp/node2.log 2>&1 &
+NODE_ID=node-2 JOIN_ADDR=localhost:8080 go run main.go > /tmp/node2.log 2>&1 &
 NODE2_PID=$!
 sleep 10
 
@@ -240,7 +243,8 @@ fi
 print_header "TEST 5: Partition Migration"
 
 print_info "Adding Node 4 to trigger partition rebalancing..."
-NODE_ID=node-4 NODE_NAME=Server-4 HTTP_ADDR=:8083 RAFT_ADDR=127.0.0.1:9004 JOIN_ADDR=localhost:8080 DATA_DIR=./data/node4 go run main.go > /tmp/node4.log 2>&1 &
+# Only NODE_ID and JOIN_ADDR required! Ports auto-calculated: 8083, 9004, 9083
+NODE_ID=node-4 JOIN_ADDR=localhost:8080 go run main.go > /tmp/node4.log 2>&1 &
 NODE4_PID=$!
 sleep 15
 
