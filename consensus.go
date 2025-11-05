@@ -102,6 +102,10 @@ func (f *clusterFSM) applyAddNode(data interface{}) error {
 	f.ck.cluster.Nodes = append(f.ck.cluster.Nodes, node)
 	f.ck.cluster.rebuildNodeMap() // Rebuild map for O(1) lookups
 	fmt.Printf("✓ Added node: %s\n", node.ID)
+	
+	// Trigger automatic partition rebalancing
+	go f.ck.triggerRebalance()
+	
 	return nil
 }
 

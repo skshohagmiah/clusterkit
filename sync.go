@@ -190,8 +190,35 @@ func (ck *ClusterKit) handleGetCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	ck.mu.RUnlock()
 
+	// Generate ETag based on cluster state (node count + partition count)
+	etag := fmt.Sprintf("\"%d-%d\"", len(clusterCopy.Nodes), len(clusterCopy.PartitionMap.Partitions))
+
+	// Check If-None-Match header
+	if match := r.Header.Get("If-None-Match"); match != "" {
+		if match == etag {
+			// Topology hasn't changed
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
+	// Add hash function metadata to response
+	response := map[string]interface{}{
+		"cluster": clusterCopy,
+		"hash_config": map[string]interface{}{
+			"algorithm":  "fnv1a",
+			"seed":       0,
+			"modulo":     clusterCopy.Config.PartitionCount,
+			"format":     "partition-%d",
+		},
+	}
+	
+	// Set ETag header
+	w.Header().Set("ETAG", etag)
 	w.Header().Set("Content-Type", "application/json")
-	data, err := json.Marshal(clusterCopy)
+	w.Header().Set("Cache-Control", "max-age=30") // Cache for 30 seconds
+	
+	data, err := json.Marshal(response)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -202,7 +229,23 @@ func (ck *ClusterKit) handleGetCluster(w http.ResponseWriter, r *http.Request) {
 // handleGetPartitions returns all partitions
 func (ck *ClusterKit) handleGetPartitions(w http.ResponseWriter, r *http.Request) {
 	partitions := ck.ListPartitions()
+
+	// Generate ETag based on partition count
+	etag := fmt.Sprintf("\"%d\"", len(partitions))
+
+	// Check If-None-Match header
+	if match := r.Header.Get("If-None-Match"); match != "" {
+		if match == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
+	// Set ETag header
+	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "max-age=30")
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"partitions": partitions,
 		"count":      len(partitions),

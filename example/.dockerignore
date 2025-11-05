@@ -1,0 +1,26 @@
+# Ignore data directories
+data/
+*.log
+
+# Ignore build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+kv-store
+
+# Ignore test files
+*_test.go
+
+# Ignore git
+.git
+.gitignore
+
+# Ignore IDE files
+.vscode
+.idea
+*.swp
+*.swo
+
+# Ignore documentation
+*.md

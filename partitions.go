@@ -269,15 +269,26 @@ func (ck *ClusterKit) GetPartitionsForNode(nodeID string) []*Partition {
 // RebalancePartitions redistributes partitions when nodes join or leave
 func (ck *ClusterKit) RebalancePartitions() error {
 	ck.mu.Lock()
-	defer ck.mu.Unlock()
-
+	
 	if ck.cluster.PartitionMap == nil {
+		ck.mu.Unlock()
 		return fmt.Errorf("partition map not initialized")
 	}
 
 	replicationFactor := ck.cluster.Config.ReplicationFactor
 	if len(ck.cluster.Nodes) < replicationFactor {
+		ck.mu.Unlock()
 		return fmt.Errorf("not enough nodes for replication factor")
+	}
+
+	// Store old assignments before rebalancing
+	oldAssignments := make(map[string]*Partition)
+	for id, partition := range ck.cluster.PartitionMap.Partitions {
+		oldAssignments[id] = &Partition{
+			ID:           partition.ID,
+			PrimaryNode:  partition.PrimaryNode,
+			ReplicaNodes: append([]string{}, partition.ReplicaNodes...),
+		}
 	}
 
 	// Reassign nodes to each partition
@@ -299,16 +310,48 @@ func (ck *ClusterKit) RebalancePartitions() error {
 			"replica_nodes": partition.ReplicaNodes,
 		}
 	}
+	
+	ck.mu.Unlock()
 
 	// Use Raft consensus
 	if err := ck.consensusManager.ProposeAction("rebalance_partitions", partitionData); err != nil {
 		return fmt.Errorf("failed to propose rebalance: %v", err)
 	}
 
+	// Trigger partition change hooks after rebalancing
+	ck.notifyPartitionChanges(oldAssignments)
+
 	// Also save locally
 	ck.saveState()
 
 	return nil
+}
+
+// triggerRebalance triggers automatic partition rebalancing
+func (ck *ClusterKit) triggerRebalance() {
+	fmt.Println("[REBALANCE] Triggering automatic partition rebalancing...")
+	
+	// Wait a bit for cluster to stabilize
+	// time.Sleep(2 * time.Second)
+	
+	if err := ck.RebalancePartitions(); err != nil {
+		fmt.Printf("[REBALANCE] ✗ Failed to rebalance: %v\n", err)
+	} else {
+		fmt.Println("[REBALANCE] ✓ Partition rebalancing complete")
+	}
+}
+
+// notifyPartitionChanges compares old and new assignments and triggers hooks
+func (ck *ClusterKit) notifyPartitionChanges(oldAssignments map[string]*Partition) {
+	ck.mu.RLock()
+	currentPartitions := ck.cluster.PartitionMap.Partitions
+	cluster := ck.cluster
+	ck.mu.RUnlock()
+	
+	// Use the hook manager to detect and notify changes
+	ck.hookManager.checkPartitionChanges(currentPartitions, cluster)
+	
+	fmt.Println("[REBALANCE] ✓ Partition change notifications sent")
 }
 
 // ListPartitions returns all partitions
