@@ -183,7 +183,12 @@ func (ck *ClusterKit) Start() error {
 	}
 
 	// Discover and join known nodes
-	go ck.discoverNodes()
+	if len(ck.knownNodes) > 0 {
+		fmt.Printf("[JOIN] Attempting to join cluster via %v\n", ck.knownNodes)
+		go ck.discoverNodes()
+	} else {
+		fmt.Printf("[JOIN] No known nodes to join (bootstrap=%v)\n", ck.consensusManager.isBootstrap)
+	}
 
 	// Auto-create partitions if bootstrap node and no partitions exist
 	if ck.consensusManager.isBootstrap {
@@ -353,9 +358,13 @@ func (ck *ClusterKit) loadState() error {
 
 // discoverNodes attempts to connect to known nodes
 func (ck *ClusterKit) discoverNodes() {
+	fmt.Printf("[JOIN] discoverNodes called with %d known nodes\n", len(ck.knownNodes))
 	for _, nodeAddr := range ck.knownNodes {
+		fmt.Printf("[JOIN] Attempting to join %s...\n", nodeAddr)
 		if err := ck.joinNodeWithRetry(nodeAddr, 3); err != nil {
-			fmt.Printf("Failed to join node %s after retries: %v\n", nodeAddr, err)
+			fmt.Printf("[JOIN] Failed to join node %s after retries: %v\n", nodeAddr, err)
+		} else {
+			fmt.Printf("[JOIN] Successfully joined cluster via %s\n", nodeAddr)
 		}
 	}
 }

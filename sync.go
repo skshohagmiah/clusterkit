@@ -65,7 +65,7 @@ func (ck *ClusterKit) handleReady(w http.ResponseWriter, r *http.Request) {
 		partitionCount = len(ck.cluster.PartitionMap.Partitions)
 	}
 	nodeCount := len(ck.cluster.Nodes)
-	
+
 	// Check if all partitions have valid primary nodes AND replicas in NodeMap
 	validPartitions := 0
 	invalidPartitions := []string{}
@@ -76,7 +76,7 @@ func (ck *ClusterKit) handleReady(w http.ResponseWriter, r *http.Request) {
 				invalidPartitions = append(invalidPartitions, partID+":primary")
 				continue
 			}
-			
+
 			// Check all replicas exist
 			allReplicasValid := true
 			for _, replicaID := range partition.ReplicaNodes {
@@ -86,36 +86,36 @@ func (ck *ClusterKit) handleReady(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
-			
+
 			if allReplicasValid {
 				validPartitions++
 			}
 		}
 	}
 	ck.mu.RUnlock()
-	
+
 	// Cluster is ready if:
 	// 1. Has at least one node
 	// 2. Has partitions created
 	// 3. All partitions have valid primary nodes AND all replicas
 	ready := nodeCount > 0 && partitionCount > 0 && validPartitions == partitionCount
-	
+
 	if ready {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"ready":             true,
-			"nodes":             nodeCount,
-			"partitions":        partitionCount,
-			"valid_partitions":  validPartitions,
+			"ready":            true,
+			"nodes":            nodeCount,
+			"partitions":       partitionCount,
+			"valid_partitions": validPartitions,
 		})
 	} else {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"ready":             false,
-			"nodes":             nodeCount,
-			"partitions":        partitionCount,
-			"valid_partitions":  validPartitions,
-			"message":           "cluster not ready",
+			"ready":            false,
+			"nodes":            nodeCount,
+			"partitions":       partitionCount,
+			"valid_partitions": validPartitions,
+			"message":          "cluster not ready",
 		})
 	}
 }
@@ -190,17 +190,17 @@ func (ck *ClusterKit) handleJoin(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		// Wait for Raft replication and partition creation
 		time.Sleep(2 * time.Second)
-		
+
 		// Only rebalance if partitions exist
 		ck.mu.RLock()
 		hasPartitions := ck.cluster.PartitionMap != nil && len(ck.cluster.PartitionMap.Partitions) > 0
 		ck.mu.RUnlock()
-		
+
 		if !hasPartitions {
 			fmt.Printf("[REBALANCE] Skipping rebalance - partitions not yet created\n")
 			return
 		}
-		
+
 		if err := ck.RebalancePartitions(); err != nil {
 			fmt.Printf("[REBALANCE] Failed to rebalance after node join: %v\n", err)
 		}
