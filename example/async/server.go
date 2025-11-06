@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/skshohagmiah/clusterkit"
@@ -29,8 +30,8 @@ func NewKVStore(ck *clusterkit.ClusterKit, nodeID, kvPort string) *KVStore {
 	}
 
 	// Register partition change hook for data migration
-	ck.OnPartitionChange(func(partitionID string, copyFrom, copyTo *clusterkit.Node) {
-		kv.handlePartitionChange(partitionID, copyFrom, copyTo)
+	ck.OnPartitionChange(func(partitionID string, copyFromNodes []*clusterkit.Node, copyTo *clusterkit.Node) {
+		kv.handlePartitionChange(partitionID, copyFromNodes, copyTo)
 	})
 
 	return kv
@@ -137,50 +138,67 @@ func (kv *KVStore) handleMigrate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Handle partition changes (data migration)
-func (kv *KVStore) handlePartitionChange(partitionID string, copyFrom, copyTo *clusterkit.Node) {
+// handlePartitionChange is called when a partition is reassigned
+func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*clusterkit.Node, copyTo *clusterkit.Node) {
+	// Only act if I'm the destination node
 	if copyTo == nil || copyTo.ID != kv.nodeID {
-		return // Not for me
-	}
-
-	if copyFrom == nil {
-		fmt.Printf("[KV-%s] Partition %s: New partition, no data to copy\n",
-			kv.nodeID, partitionID)
 		return
 	}
 
-	fmt.Printf("[KV-%s] 🔄 Migrating partition %s from %s\n",
-		kv.nodeID, partitionID, copyFrom.ID)
-
-	// Request all keys for this partition from the source node
-	url := fmt.Sprintf("http://%s/kv/migrate?partition=%s", copyFrom.IP, partitionID)
-	resp, err := http.Get(url)
-	if err != nil {
-		fmt.Printf("[KV-%s] ❌ Migration failed: %v\n", kv.nodeID, err)
-		return
-	}
-	defer resp.Body.Close()
-
-	var migrationData struct {
-		PartitionID string            `json:"partition_id"`
-		Keys        map[string]string `json:"keys"`
-		Count       int               `json:"count"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&migrationData); err != nil {
-		fmt.Printf("[KV-%s] ❌ Failed to decode migration data: %v\n", kv.nodeID, err)
+	if len(copyFromNodes) == 0 {
+		log.Printf("[KV-%s] New partition %s assigned (no data to copy)\n", kv.nodeID, partitionID)
 		return
 	}
 
-	// Store all migrated keys locally
+	log.Printf("[KV-%s] 🔄 Migrating partition %s from %d nodes\n", kv.nodeID, partitionID, len(copyFromNodes))
+
+	// Merge data from ALL source nodes
+	mergedData := make(map[string]string)
+	
+	for _, sourceNode := range copyFromNodes {
+		// Fetch data from this source node
+		url := fmt.Sprintf("http://localhost:%s/kv/migrate?partition=%s", extractPort(sourceNode.IP), partitionID)
+		resp, err := http.Get(url)
+		if err != nil {
+			log.Printf("[KV-%s] ⚠️  Failed to fetch from %s: %v\n", kv.nodeID, sourceNode.ID, err)
+			continue
+		}
+
+		// Decode migration data
+		var migrationData struct {
+			PartitionID string            `json:"partition_id"`
+			Keys        map[string]string `json:"keys"`
+			Count       int               `json:"count"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&migrationData); err != nil {
+			log.Printf("[KV-%s] ⚠️  Failed to decode from %s: %v\n", kv.nodeID, sourceNode.ID, err)
+			resp.Body.Close()
+			continue
+		}
+		resp.Body.Close()
+
+		// Merge keys (last write wins - developer can add versioning here)
+		for key, value := range migrationData.Keys {
+			mergedData[key] = value
+		}
+		
+		log.Printf("[KV-%s] 📦 Fetched %d keys from %s\n", kv.nodeID, migrationData.Count, sourceNode.ID)
+	}
+
+	// Import all merged keys
 	kv.mu.Lock()
-	for key, value := range migrationData.Keys {
+	for key, value := range mergedData {
 		kv.data[key] = value
 	}
 	kv.mu.Unlock()
 
-	fmt.Printf("[KV-%s] ✅ Migrated %d keys from %s for partition %s\n",
-		kv.nodeID, migrationData.Count, copyFrom.ID, partitionID)
+	log.Printf("[KV-%s] ✅ Migrated %d keys for partition %s from %d sources\n", 
+		kv.nodeID, len(mergedData), partitionID, len(copyFromNodes))
+}
+
+func extractPort(ip string) string {
+	return ip[strings.LastIndex(ip, ":")+1:]
 }
 
 func main() {

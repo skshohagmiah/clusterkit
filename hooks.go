@@ -7,13 +7,13 @@ import (
 
 // PartitionChange represents a change in partition assignment
 type PartitionChange struct {
-	PartitionID string // The partition that changed (e.g., "partition-5")
-	CopyFromNode *Node // Node to copy data from (nil if no copy needed)
-	CopyToNode   *Node // Node that needs the data (YOU)
+	PartitionID   string  // The partition that changed (e.g., "partition-5")
+	CopyFromNodes []*Node // Nodes to copy data from (all nodes that have the data)
+	CopyToNode    *Node   // Node that needs the data (YOU)
 }
 
 // PartitionChangeHook is a callback function for partition changes
-type PartitionChangeHook func(partitionID string, copyFrom *Node, copyTo *Node)
+type PartitionChangeHook func(partitionID string, copyFromNodes []*Node, copyToNode *Node)
 
 // HookManager manages partition change hooks
 type HookManager struct {
@@ -64,9 +64,9 @@ func (hm *HookManager) checkPartitionChanges(currentPartitions map[string]*Parti
 		for _, hook := range hm.hooks {
 			// Acquire semaphore slot (blocks if pool is full)
 			hm.workerPool <- struct{}{}
-			
+
 			// Execute hook in goroutine
-			go func(h PartitionChangeHook, partID string, from, to *Node) {
+			go func(h PartitionChangeHook, partID string, fromNodes []*Node, to *Node) {
 				defer func() {
 					// Release semaphore slot
 					<-hm.workerPool
@@ -75,8 +75,8 @@ func (hm *HookManager) checkPartitionChanges(currentPartitions map[string]*Parti
 						fmt.Printf("Hook panic recovered: %v\n", r)
 					}
 				}()
-				h(partID, from, to)
-			}(hook, change.PartitionID, change.CopyFromNode, change.CopyToNode)
+				h(partID, fromNodes, to)
+			}(hook, change.PartitionID, change.CopyFromNodes, change.CopyToNode)
 		}
 	}
 
@@ -99,70 +99,73 @@ func (hm *HookManager) detectChanges(old, new map[string]*Partition, cluster *Cl
 
 		// Find nodes that need data (new primary or new replicas)
 		nodesToNotify := make(map[string]bool)
-		
+
 		// Check if primary changed
 		if oldPartition.PrimaryNode != newPartition.PrimaryNode {
 			nodesToNotify[newPartition.PrimaryNode] = true
 		}
-		
+
 		// Check for new replicas
 		oldReplicaSet := make(map[string]bool)
 		for _, r := range oldPartition.ReplicaNodes {
 			oldReplicaSet[r] = true
 		}
-		
+
 		for _, newReplicaID := range newPartition.ReplicaNodes {
 			if !oldReplicaSet[newReplicaID] {
 				// This is a NEW replica that needs data
 				nodesToNotify[newReplicaID] = true
 			}
 		}
-		
+
 		// Create a change notification for each node that needs data
 		for nodeID := range nodesToNotify {
-			// Find a node to copy from
-			copyFromNode := ""
-			
-			// Try old replicas first (they have the data)
-			for _, replicaID := range oldPartition.ReplicaNodes {
-				if replicaID != nodeID {
-					copyFromNode = replicaID
-					break
+			// Collect ALL nodes that have the data (OLD primary + OLD replicas)
+			copyFromNodes := []*Node{}
+
+			// IMPORTANT: Only use nodes that ALREADY HAD the data AND are NOT also migrating
+			// This ensures we copy from stable nodes with complete data
+
+			// Add old primary if still alive and not the target node
+			if oldPartition.PrimaryNode != nodeID {
+				if node := getNodeByID(cluster, oldPartition.PrimaryNode); node != nil {
+					copyFromNodes = append(copyFromNodes, node)
 				}
 			}
-			
-			// If no old replica, try old primary
-			if copyFromNode == "" && oldPartition.PrimaryNode != nodeID {
-				copyFromNode = oldPartition.PrimaryNode
-			}
-			
-			// If still nothing, try new replicas
-			if copyFromNode == "" {
-				for _, replicaID := range newPartition.ReplicaNodes {
-					if replicaID != nodeID {
-						copyFromNode = replicaID
-						break
+
+			// Add all old replicas that are NOT also being promoted/changed
+			for _, replicaID := range oldPartition.ReplicaNodes {
+				if replicaID != nodeID {
+					// Check if this replica is also being promoted to primary
+					// If so, skip it as a source (it's also migrating)
+					if replicaID == newPartition.PrimaryNode && replicaID != oldPartition.PrimaryNode {
+						// This replica is being promoted to primary, skip as source
+						continue
+					}
+
+					if node := getNodeByID(cluster, replicaID); node != nil {
+						// Check if not already in list
+						alreadyAdded := false
+						for _, n := range copyFromNodes {
+							if n.ID == replicaID {
+								alreadyAdded = true
+								break
+							}
+						}
+						if !alreadyAdded {
+							copyFromNodes = append(copyFromNodes, node)
+						}
 					}
 				}
 			}
-			
-			// Find the actual Node objects
-			var copyToNodeObj *Node
-			var copyFromNodeObj *Node
-			
-			for i := range cluster.Nodes {
-				if cluster.Nodes[i].ID == nodeID {
-					copyToNodeObj = &cluster.Nodes[i]
-				}
-				if cluster.Nodes[i].ID == copyFromNode {
-					copyFromNodeObj = &cluster.Nodes[i]
-				}
-			}
-			
+
+			// Find the target node object
+			copyToNodeObj := getNodeByID(cluster, nodeID)
+
 			changes = append(changes, PartitionChange{
-				PartitionID:  partitionID,
-				CopyToNode:   copyToNodeObj,
-				CopyFromNode: copyFromNodeObj,
+				PartitionID:   partitionID,
+				CopyToNode:    copyToNodeObj,
+				CopyFromNodes: copyFromNodes,
 			})
 		}
 	}
@@ -204,4 +207,14 @@ func (hm *HookManager) copyPartitionMap(partitions map[string]*Partition) map[st
 		}
 	}
 	return result
+}
+
+// getNodeByID finds a node by ID in the cluster
+func getNodeByID(cluster *Cluster, nodeID string) *Node {
+	for i := range cluster.Nodes {
+		if cluster.Nodes[i].ID == nodeID {
+			return &cluster.Nodes[i]
+		}
+	}
+	return nil
 }

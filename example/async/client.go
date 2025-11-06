@@ -58,6 +58,7 @@ func NewClient(nodes []string) (*Client, error) {
 }
 
 // Set writes to primary first, then replicates in background (ASYNC strategy)
+// If primary fails, immediately falls back to replicas for zero-downtime
 func (c *Client) Set(key, value string) error {
 	partitionID := c.getPartitionID(key)
 
@@ -80,45 +81,85 @@ func (c *Client) Set(key, value string) error {
 	payload := map[string]string{"key": key, "value": value}
 	data, _ := json.Marshal(payload)
 
-	// 1. Write to PRIMARY first (blocking - fast response)
+	// 1. Try PRIMARY first (blocking - fast response)
 	primaryAddr := c.getNodeAddr(partition.PrimaryNode)
-	if primaryAddr == "" {
-		return fmt.Errorf("primary not found")
-	}
+	if primaryAddr != "" {
+		url := fmt.Sprintf("http://%s/kv/set", primaryAddr)
+		resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(data))
+		if err == nil && resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			
+			// Success! Replicate to replicas in BACKGROUND
+			go func() {
+				for _, replicaID := range partition.ReplicaNodes {
+					replicaAddr := c.getNodeAddr(replicaID)
+					if replicaAddr == "" {
+						continue
+					}
 
-	url := fmt.Sprintf("http://%s/kv/set", primaryAddr)
-	resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(data))
-	if err != nil {
-		// Primary failed, refresh topology for next request
-		go c.refreshTopology()
-		return err
-	}
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// Primary failed, refresh topology for next request
-		go c.refreshTopology()
-		return fmt.Errorf("write failed: %d", resp.StatusCode)
-	}
-
-	// 2. Replicate to replicas in BACKGROUND (fire-and-forget)
-	go func() {
-		for _, replicaID := range partition.ReplicaNodes {
-			replicaAddr := c.getNodeAddr(replicaID)
-			if replicaAddr == "" {
-				continue
-			}
-
-			url := fmt.Sprintf("http://%s/kv/set", replicaAddr)
-			resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(data))
-			if err == nil && resp != nil {
-				resp.Body.Close()
-			}
-			// Silently ignore replica failures - eventual consistency
+					url := fmt.Sprintf("http://%s/kv/set", replicaAddr)
+					resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(data))
+					if err == nil && resp != nil {
+						resp.Body.Close()
+					}
+				}
+			}()
+			
+			return nil
 		}
-	}()
+		if resp != nil {
+			resp.Body.Close()
+		}
+		
+		fmt.Printf("[Client] ⚠️  Primary %s failed, trying replicas...\n", partition.PrimaryNode)
+	}
 
-	return nil
+	// 2. PRIMARY FAILED! Try replicas immediately (FAILOVER)
+	for _, replicaID := range partition.ReplicaNodes {
+		replicaAddr := c.getNodeAddr(replicaID)
+		if replicaAddr == "" {
+			continue
+		}
+
+		url := fmt.Sprintf("http://%s/kv/set", replicaAddr)
+		resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(data))
+		if err == nil && resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			
+			fmt.Printf("[Client] ✅ Failover successful: wrote to replica %s\n", replicaID)
+			
+			// Trigger topology refresh in background
+			go c.refreshTopology()
+			
+			// Replicate to other replicas in background
+			go func() {
+				for _, otherReplicaID := range partition.ReplicaNodes {
+					if otherReplicaID == replicaID {
+						continue
+					}
+					otherAddr := c.getNodeAddr(otherReplicaID)
+					if otherAddr == "" {
+						continue
+					}
+
+					url := fmt.Sprintf("http://%s/kv/set", otherAddr)
+					resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(data))
+					if err == nil && resp != nil {
+						resp.Body.Close()
+					}
+				}
+			}()
+			
+			return nil
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+	}
+
+	// All nodes failed
+	go c.refreshTopology()
+	return fmt.Errorf("all nodes unavailable for partition %s", partitionID)
 }
 
 // Get reads from any available node

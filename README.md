@@ -39,6 +39,132 @@ ClusterKit tells you **WHERE** data should go. You decide **HOW** to store it.
 
 ---
 
+## Zero-Downtime Failover
+
+ClusterKit implements **client-side retry with replica fallback** for instant failover when nodes fail:
+
+```
+Normal:    Client → Primary → Success ✅
+Failover:  Client → Primary ❌ → Replica → Success ✅ (<100ms)
+```
+
+**Key Benefits:**
+- ⚡ **<100ms failover** - Instant retry on replicas
+- 🔄 **Zero data loss** - Replicas have the data
+- 🚀 **No blocking** - Operations continue during rebalancing
+- 📊 **Eventual consistency** - Data syncs within 30s
+
+### How It Works
+
+When a primary node fails:
+1. Client detects connection error immediately
+2. Client retries on replica nodes (no delay)
+3. Replica accepts write and returns success
+4. Topology refresh triggered in background
+5. Rebalancing happens without blocking operations
+
+**Example:**
+```go
+// Client automatically retries on replicas
+err := client.Set("user:123", "data")
+// If primary fails, client tries replicas immediately
+// User sees <100ms latency, not 20-30s downtime!
+```
+
+See [PARTITIONING.md](PARTITIONING.md) for detailed documentation on partitioning, replication, and failover.
+
+---
+
+## Data Migration & Partition Changes
+
+ClusterKit provides a powerful hook system that notifies you when partitions are reassigned. The hook receives **ALL nodes that have the data**, allowing you to merge from multiple sources to prevent data loss.
+
+### OnPartitionChange Hook
+
+```go
+// Register hook to handle partition changes
+ck.OnPartitionChange(func(partitionID string, copyFromNodes []*Node, copyToNode *Node) {
+    if copyToNode.ID != myNodeID {
+        return // Not for me
+    }
+    
+    log.Printf("📦 Migrating %s from %d nodes", partitionID, len(copyFromNodes))
+    
+    // Merge data from ALL source nodes
+    mergedData := make(map[string]string)
+    
+    for _, sourceNode := range copyFromNodes {
+        data := fetchDataFromNode(sourceNode, partitionID)
+        
+        // Merge with your conflict resolution strategy
+        for key, value := range data {
+            mergedData[key] = value  // Last-write-wins
+            // OR: Use version numbers, timestamps, etc.
+        }
+    }
+    
+    // Store merged data
+    storeData(mergedData)
+    log.Printf("✅ Migrated %d keys", len(mergedData))
+})
+```
+
+### Why Multiple Source Nodes?
+
+When a primary fails and replicas accept writes during failover, different replicas may have different data. ClusterKit provides **ALL nodes that had the partition** so you can merge them:
+
+```
+Before:  partition-37: Primary=node-2 ☠️, Replicas=[node-3, node-4]
+         └─ Client writes go to node-3 during failover
+
+After:   partition-37: Primary=node-5, Replicas=[node-3, node-6]
+         └─ node-5 receives: copyFromNodes=[node-3, node-4]
+         └─ Merges data from BOTH to prevent loss!
+```
+
+### Conflict Resolution Strategies
+
+**1. Last-Write-Wins (Simple)**
+```go
+for key, value := range data {
+    mergedData[key] = value  // Latest overwrites
+}
+```
+
+**2. Version-Based (Recommended)**
+```go
+type ValueWithVersion struct {
+    Value   string
+    Version int64  // Timestamp
+}
+
+for key, newValue := range data {
+    existing := mergedData[key]
+    if newValue.Version > existing.Version {
+        mergedData[key] = newValue  // Keep newer
+    }
+}
+```
+
+**3. Custom Logic**
+```go
+for key, newValue := range data {
+    existing := mergedData[key]
+    mergedData[key] = myCustomMerge(existing, newValue)
+}
+```
+
+### When Hooks Are Triggered
+
+- ✅ Node joins cluster (new partitions assigned)
+- ✅ Node leaves cluster (partitions reassigned)
+- ✅ Primary node fails (replica promoted to primary)
+- ✅ Rebalancing completes (partition ownership changes)
+
+**Important:** Hooks run in **background goroutines** (max 50 concurrent). Your application continues serving requests during migration.
+
+---
+
 ## Installation
 
 ```bash

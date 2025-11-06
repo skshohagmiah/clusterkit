@@ -32,8 +32,8 @@ func NewKVStore(ck *clusterkit.ClusterKit, nodeID, kvPort string) *KVStore {
 	}
 
 	// Register partition change hook for data migration
-	ck.OnPartitionChange(func(partitionID string, copyFrom, copyTo *clusterkit.Node) {
-		kv.handlePartitionChange(partitionID, copyFrom, copyTo)
+	ck.OnPartitionChange(func(partitionID string, copyFromNodes []*clusterkit.Node, copyTo *clusterkit.Node) {
+		kv.handlePartitionChange(partitionID, copyFromNodes, copyTo)
 	})
 
 	return kv
@@ -94,28 +94,46 @@ func (kv *KVStore) handleSet(w http.ResponseWriter, r *http.Request) {
 
 	// Check if I'm a replica
 	if kv.ck.IsReplica(partition) {
-		// I'm REPLICA - just store locally
+		// I'm REPLICA - accept write (primary may be down - FAILOVER)
 		kv.mu.Lock()
 		kv.data[req.Key] = req.Value
 		kv.mu.Unlock()
 
+		// Log warning if this is a direct client write (not replication)
+		if !req.Replicate {
+			fmt.Printf("[KV-%s] ⚠️  Replica accepting write for %s (primary may be down)\n", 
+				kv.nodeID, partition.ID)
+		}
+
 		json.NewEncoder(w).Encode(map[string]string{
-			"status": "ok",
-			"role":   "replica",
-			"node":   kv.nodeID,
+			"status":  "ok",
+			"role":    "replica",
+			"node":    kv.nodeID,
+			"warning": "written_to_replica",
 		})
 		return
 	}
 
 	// I'm neither primary nor replica - forward to primary
 	primary := kv.ck.GetPrimary(partition)
-	if primary == nil {
-		http.Error(w, "primary not found", http.StatusServiceUnavailable)
-		return
+	if primary != nil {
+		// Try forwarding to primary
+		if kv.forwardToPrimary(w, primary.IP, req.Key, req.Value) {
+			return // Success
+		}
+		fmt.Printf("[KV-%s] ⚠️  Primary forward failed, trying replicas...\n", kv.nodeID)
 	}
 
-	// Forward to primary
-	kv.forwardToPrimary(w, primary.IP, req.Key, req.Value)
+	// Primary failed or not found - try replicas (FAILOVER)
+	replicas := kv.ck.GetReplicas(partition)
+	for _, replica := range replicas {
+		if kv.forwardToPrimary(w, replica.IP, req.Key, req.Value) {
+			fmt.Printf("[KV-%s] ✅ Failover: forwarded to replica %s\n", kv.nodeID, replica.ID)
+			return
+		}
+	}
+
+	http.Error(w, "all nodes unavailable", http.StatusServiceUnavailable)
 }
 
 func (kv *KVStore) handleGet(w http.ResponseWriter, r *http.Request) {
@@ -320,66 +338,83 @@ func (kv *KVStore) replicateDeletion(partition *clusterkit.Partition, key string
 	}
 }
 
-func (kv *KVStore) forwardToPrimary(w http.ResponseWriter, primaryAddr, key, value string) {
+func (kv *KVStore) forwardToPrimary(w http.ResponseWriter, primaryAddr, key, value string) bool {
 	payload := map[string]string{"key": key, "value": value}
 	data, _ := json.Marshal(payload)
 
 	url := fmt.Sprintf("http://%s/kv/set", primaryAddr)
 	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
+		return false
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+
 	w.WriteHeader(resp.StatusCode)
 	json.NewEncoder(w).Encode(map[string]string{"status": "forwarded"})
+	return true
 }
 
 // Handle partition change (data migration)
-func (kv *KVStore) handlePartitionChange(partitionID string, copyFrom, copyTo *clusterkit.Node) {
+func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*clusterkit.Node, copyTo *clusterkit.Node) {
 	if copyTo == nil || copyTo.ID != kv.nodeID {
 		return // Not for me
 	}
 
-	if copyFrom == nil {
+	if len(copyFromNodes) == 0 {
 		fmt.Printf("[KV-%s] Partition %s: New partition, no data to copy\n",
 			kv.nodeID, partitionID)
 		return
 	}
 
-	fmt.Printf("[KV-%s] 🔄 Partition %s: Migrating data from %s\n",
-		kv.nodeID, partitionID, copyFrom.ID)
+	fmt.Printf("[KV-%s] 🔄 Partition %s: Migrating data from %d nodes\n",
+		kv.nodeID, partitionID, len(copyFromNodes))
 
-	// Request all keys for this partition from the source node
-	url := fmt.Sprintf("http://%s/kv/migrate?partition=%s", copyFrom.IP, partitionID)
-	resp, err := http.Get(url)
-	if err != nil {
-		fmt.Printf("[KV-%s] ❌ Migration failed: %v\n", kv.nodeID, err)
-		return
+	// Merge data from ALL source nodes
+	mergedData := make(map[string]string)
+	
+	for _, sourceNode := range copyFromNodes {
+		// Request all keys for this partition from the source node
+		url := fmt.Sprintf("http://%s/kv/migrate?partition=%s", sourceNode.IP, partitionID)
+		resp, err := http.Get(url)
+		if err != nil {
+			fmt.Printf("[KV-%s] ⚠️  Failed to fetch from %s: %v\n", kv.nodeID, sourceNode.ID, err)
+			continue
+		}
+
+		var migrationData struct {
+			PartitionID string            `json:"partition_id"`
+			Keys        map[string]string `json:"keys"`
+			Count       int               `json:"count"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&migrationData); err != nil {
+			fmt.Printf("[KV-%s] ⚠️  Failed to decode from %s: %v\n", kv.nodeID, sourceNode.ID, err)
+			resp.Body.Close()
+			continue
+		}
+		resp.Body.Close()
+
+		// Merge keys (last write wins - developer can add versioning here)
+		for key, value := range migrationData.Keys {
+			mergedData[key] = value
+		}
+		
+		fmt.Printf("[KV-%s] 📦 Fetched %d keys from %s\n", kv.nodeID, migrationData.Count, sourceNode.ID)
 	}
-	defer resp.Body.Close()
 
-	var migrationData struct {
-		PartitionID string            `json:"partition_id"`
-		Keys        map[string]string `json:"keys"`
-		Count       int               `json:"count"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&migrationData); err != nil {
-		fmt.Printf("[KV-%s] ❌ Failed to decode migration data: %v\n", kv.nodeID, err)
-		return
-	}
-
-	// Store all migrated keys locally
+	// Store all merged keys locally
 	kv.mu.Lock()
-	for key, value := range migrationData.Keys {
+	for key, value := range mergedData {
 		kv.data[key] = value
 	}
 	kv.mu.Unlock()
 
-	fmt.Printf("[KV-%s] ✅ Migration completed: %d keys copied from %s for partition %s\n",
-		kv.nodeID, migrationData.Count, copyFrom.ID, partitionID)
+	fmt.Printf("[KV-%s] ✅ Migration completed: %d keys merged from %d sources for partition %s\n",
+		kv.nodeID, len(mergedData), len(copyFromNodes), partitionID)
 }
 
 func main() {
