@@ -136,8 +136,10 @@ func TestHealthCheck(t *testing.T) {
 		t.Errorf("Expected NodeID %s, got %s", opts.NodeID, health.NodeID)
 	}
 
-	if health.NodeName != opts.NodeName {
-		t.Errorf("Expected NodeName %s, got %s", opts.NodeName, health.NodeName)
+	// NodeName is auto-generated from NodeID if not provided
+	expectedNodeName := "Test-node-1" // generateNodeName("test-node-1") -> "Test-node-1"
+	if health.NodeName != expectedNodeName {
+		t.Errorf("Expected NodeName %s, got %s", expectedNodeName, health.NodeName)
 	}
 
 	if health.NodeCount != 1 {

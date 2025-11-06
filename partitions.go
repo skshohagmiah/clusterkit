@@ -46,7 +46,7 @@ func (ck *ClusterKit) CreatePartitions() error {
 	// Prepare partition data for Raft proposal
 	partitionData := make(map[string]interface{})
 	partitionData["partitions"] = make(map[string]interface{})
-	
+
 	partitions := partitionData["partitions"].(map[string]interface{})
 	for id, partition := range ck.cluster.PartitionMap.Partitions {
 		partitions[id] = map[string]interface{}{
@@ -55,7 +55,7 @@ func (ck *ClusterKit) CreatePartitions() error {
 			"replica_nodes": partition.ReplicaNodes,
 		}
 	}
-	
+
 	// Release lock before calling Raft (which may block)
 	ck.mu.Unlock()
 
@@ -190,54 +190,6 @@ func (ck *ClusterKit) GetAllNodesForKey(key string) (primary *Node, replicas []N
 	return primary, replicas, nil
 }
 
-// IsPrimaryForKey checks if the current node is the primary for a given key
-func (ck *ClusterKit) IsPrimaryForKey(key string) (bool, error) {
-	partition, err := ck.GetPartition(key)
-	if err != nil {
-		return false, err
-	}
-
-	return partition.PrimaryNode == ck.cluster.ID, nil
-}
-
-// IsReplicaForKey checks if the current node is a replica for a given key
-func (ck *ClusterKit) IsReplicaForKey(key string) (bool, error) {
-	partition, err := ck.GetPartition(key)
-	if err != nil {
-		return false, err
-	}
-
-	for _, replicaNode := range partition.ReplicaNodes {
-		if replicaNode == ck.cluster.ID {
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
-
-// ShouldHandleKey checks if the current node should handle a key (primary or replica)
-func (ck *ClusterKit) ShouldHandleKey(key string) (bool, string, error) {
-	partition, err := ck.GetPartition(key)
-	if err != nil {
-		return false, "", err
-	}
-
-	// Check if primary
-	if partition.PrimaryNode == ck.cluster.ID {
-		return true, "primary", nil
-	}
-
-	// Check if replica
-	for _, replicaNode := range partition.ReplicaNodes {
-		if replicaNode == ck.cluster.ID {
-			return true, "replica", nil
-		}
-	}
-
-	return false, "", nil
-}
-
 // GetPartitionsForNode returns all partitions where the node is primary or replica
 func (ck *ClusterKit) GetPartitionsForNode(nodeID string) []*Partition {
 	ck.mu.RLock()
@@ -269,7 +221,7 @@ func (ck *ClusterKit) GetPartitionsForNode(nodeID string) []*Partition {
 // RebalancePartitions redistributes partitions when nodes join or leave
 func (ck *ClusterKit) RebalancePartitions() error {
 	ck.mu.Lock()
-	
+
 	if ck.cluster.PartitionMap == nil {
 		ck.mu.Unlock()
 		return fmt.Errorf("partition map not initialized")
@@ -301,7 +253,7 @@ func (ck *ClusterKit) RebalancePartitions() error {
 	// Propose rebalance through Raft consensus
 	partitionData := make(map[string]interface{})
 	partitionData["partitions"] = make(map[string]interface{})
-	
+
 	partitions := partitionData["partitions"].(map[string]interface{})
 	for id, partition := range ck.cluster.PartitionMap.Partitions {
 		partitions[id] = map[string]interface{}{
@@ -310,7 +262,7 @@ func (ck *ClusterKit) RebalancePartitions() error {
 			"replica_nodes": partition.ReplicaNodes,
 		}
 	}
-	
+
 	ck.mu.Unlock()
 
 	// Use Raft consensus
@@ -330,10 +282,10 @@ func (ck *ClusterKit) RebalancePartitions() error {
 // triggerRebalance triggers automatic partition rebalancing
 func (ck *ClusterKit) triggerRebalance() {
 	fmt.Println("[REBALANCE] Triggering automatic partition rebalancing...")
-	
+
 	// Wait a bit for cluster to stabilize
 	// time.Sleep(2 * time.Second)
-	
+
 	if err := ck.RebalancePartitions(); err != nil {
 		fmt.Printf("[REBALANCE] ✗ Failed to rebalance: %v\n", err)
 	} else {
@@ -347,10 +299,10 @@ func (ck *ClusterKit) notifyPartitionChanges(oldAssignments map[string]*Partitio
 	currentPartitions := ck.cluster.PartitionMap.Partitions
 	cluster := ck.cluster
 	ck.mu.RUnlock()
-	
+
 	// Use the hook manager to detect and notify changes
 	ck.hookManager.checkPartitionChanges(currentPartitions, cluster)
-	
+
 	fmt.Println("[REBALANCE] ✓ Partition change notifications sent")
 }
 

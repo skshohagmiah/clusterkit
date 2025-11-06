@@ -1,7 +1,5 @@
 package clusterkit
 
-import "context"
-
 // ============================================
 // SIMPLE API - Clean and Intuitive
 // ============================================
@@ -63,7 +61,7 @@ func (ck *ClusterKit) GetReplicas(partition *Partition) []Node {
 	defer ck.mu.RUnlock()
 
 	replicas := make([]Node, 0, len(partition.ReplicaNodes))
-	
+
 	// O(R) - loop through replicas with O(1) map lookup each
 	for _, replicaID := range partition.ReplicaNodes {
 		if replicaNode, exists := ck.cluster.NodeMap[replicaID]; exists {
@@ -76,13 +74,7 @@ func (ck *ClusterKit) GetReplicas(partition *Partition) []Node {
 
 // GetMyNodeID returns the current node's ID
 func (ck *ClusterKit) GetMyNodeID() string {
-	ck.mu.RLock()
-	defer ck.mu.RUnlock()
-	
-	if len(ck.cluster.Nodes) > 0 {
-		return ck.cluster.Nodes[0].ID
-	}
-	return ""
+	return ck.nodeID
 }
 
 // IsPrimary checks if the current node is the primary for a partition
@@ -111,13 +103,3 @@ func (ck *ClusterKit) IsReplica(partition *Partition) bool {
 // ============================================
 // Context-Aware Versions (Optional)
 // ============================================
-
-// GetPartitionWithContext returns partition for a key with context support
-func (ck *ClusterKit) GetPartitionWithContext(ctx context.Context, key string) (*Partition, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-		return ck.GetPartition(key)
-	}
-}

@@ -24,10 +24,20 @@ func (c *Cluster) GetNodeByID(nodeID string) (*Node, error) {
 
 // rebuildNodeMap rebuilds the NodeMap from the Nodes slice for O(1) lookups
 func (c *Cluster) rebuildNodeMap() {
-	c.NodeMap = make(map[string]*Node, len(c.Nodes))
+	if c.NodeMap == nil {
+		c.NodeMap = make(map[string]*Node, len(c.Nodes))
+	} else {
+		// Clear existing map
+		for k := range c.NodeMap {
+			delete(c.NodeMap, k)
+		}
+	}
+	
 	for i := range c.Nodes {
 		c.NodeMap[c.Nodes[i].ID] = &c.Nodes[i]
 	}
+	
+	fmt.Printf("[DEBUG] rebuildNodeMap: %d nodes -> %d NodeMap entries\n", len(c.Nodes), len(c.NodeMap))
 }
 
 func (c *Cluster) ListNodes() []Node {

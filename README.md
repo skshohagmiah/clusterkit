@@ -89,26 +89,32 @@ func main() {
 // Step 1: Get partition for a key
 partition, err := ck.GetPartition("user:123")
 
-// Step 2: Get nodes
-primary := ck.GetPrimary(partition)
-replicas := ck.GetReplicas(partition)
-allNodes := ck.GetNodes(partition)  // primary + replicas
-
-// Step 3: Check if current node should handle it
+// Step 2: Check if I'm the PRIMARY
 if ck.IsPrimary(partition) {
+    // I'm PRIMARY - store locally first
     storeLocally(key, value)
-}
-
-if ck.IsReplica(partition) {
-    storeLocally(key, value)
-}
-
-// Step 4: Forward to other nodes
-for _, replica := range replicas {
-    if replica.ID != ck.GetMyNodeID() {
-        httpPost(replica, key, value)
+    
+    // Then replicate to ALL replicas
+    replicas := ck.GetReplicas(partition)
+    for _, replica := range replicas {
+        if replica.ID != ck.GetMyNodeID() {
+            httpPost(replica, key, value)
+        }
     }
+    return
 }
+
+// Step 3: Check if I'm a REPLICA
+if ck.IsReplica(partition) {
+    // I'm a replica - just store locally
+    // DO NOT replicate to other replicas (primary's job!)
+    storeLocally(key, value)
+    return
+}
+
+// Step 4: I'm NEITHER - forward to primary
+primary := ck.GetPrimary(partition)
+httpPost(primary, key, value)
 ```
 
 ## Complete API Reference
@@ -182,37 +188,36 @@ func (kv *DistributedKV) Set(key, value string) error {
         return err
     }
     
-    // Step 2: Get nodes
-    primary := kv.ck.GetPrimary(partition)
-    replicas := kv.ck.GetReplicas(partition)
-    
-    // Step 3: Send to primary
+    // Step 2: Check if I'm the PRIMARY
     if kv.ck.IsPrimary(partition) {
-        // I'm the primary - store locally
+        // I'm PRIMARY - store locally first
         kv.mu.Lock()
         kv.store[key] = value
         kv.mu.Unlock()
-    } else {
-        // Forward to primary
-        httpPost(primary, key, value)
-    }
-    
-    // Step 4: Send to replicas
-    if kv.ck.IsReplica(partition) {
-        // I'm a replica - store locally
-        kv.mu.Lock()
-        kv.store[key] = value
-        kv.mu.Unlock()
-    }
-    
-    // Forward to other replicas
-    for _, replica := range replicas {
-        if replica.ID != kv.ck.GetMyNodeID() {
-            httpPost(replica, key, value)
+        
+        // Then replicate to ALL replicas
+        replicas := kv.ck.GetReplicas(partition)
+        for _, replica := range replicas {
+            if replica.ID != kv.ck.GetMyNodeID() {
+                httpPost(replica, key, value)
+            }
         }
+        return nil
     }
     
-    return nil
+    // Step 3: Check if I'm a REPLICA
+    if kv.ck.IsReplica(partition) {
+        // I'm a replica - just store locally
+        // DO NOT replicate to other replicas (primary's job!)
+        kv.mu.Lock()
+        kv.store[key] = value
+        kv.mu.Unlock()
+        return nil
+    }
+    
+    // Step 4: I'm NEITHER - forward to primary
+    primary := kv.ck.GetPrimary(partition)
+    return httpPost(primary, key, value)
 }
 
 func (kv *DistributedKV) Get(key string) (string, error) {

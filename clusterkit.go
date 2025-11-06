@@ -14,15 +14,18 @@ import (
 // ClusterKit is the main entry point for the library
 type ClusterKit struct {
 	cluster          *Cluster
+	nodeID           string // Current node's ID
 	stateFile        string
 	httpAddr         string
 	httpServer       *http.Server
+	httpClient       *http.Client
 	knownNodes       []string
 	mu               sync.RWMutex
 	stopChan         chan struct{}
 	syncInterval     time.Duration
 	consensusManager *ConsensusManager
 	hookManager      *HookManager // Partition change hooks
+	logger           Logger       // Structured logger
 	// Metrics tracking
 	startTime    time.Time
 	lastSync     time.Time
@@ -50,6 +53,9 @@ type Options struct {
 	// Cluster Formation
 	JoinAddr  string // Address of existing node to join (empty for first node)
 	Bootstrap bool   // Set to true for first node (default: auto-detect)
+	
+	// Optional Logger
+	Logger Logger // Custom logger (default: DefaultLogger with Info level)
 }
 
 // NewClusterKit initializes a new ClusterKit instance
@@ -121,14 +127,23 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 	cluster.Nodes = append(cluster.Nodes, selfNode)
 	cluster.rebuildNodeMap() // Initialize NodeMap for O(1) lookups
 
+	// Set default logger if not provided
+	logger := opts.Logger
+	if logger == nil {
+		logger = NewDefaultLogger(LogLevelInfo)
+	}
+	
+	// Initialize ClusterKit
 	ck := &ClusterKit{
 		cluster:      cluster,
+		nodeID:       opts.NodeID,
 		stateFile:    stateFile,
 		httpAddr:     opts.HTTPAddr,
+		httpClient:   &http.Client{Timeout: 10 * time.Second},
 		knownNodes:   []string{},
 		stopChan:     make(chan struct{}),
 		syncInterval: opts.SyncInterval,
-		hookManager:  newHookManager(),
+		logger:       logger,
 		startTime:    time.Now(),
 	}
 	
@@ -139,6 +154,13 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 
 	// Initialize consensus manager
 	ck.consensusManager = NewConsensusManager(ck, opts.Bootstrap, opts.RaftAddr)
+
+	// Initialize hook manager
+	ck.hookManager = &HookManager{
+		hooks:              []PartitionChangeHook{},
+		lastPartitionState: make(map[string]*Partition),
+		workerPool:         make(chan struct{}, 50),
+	}
 
 	// Load existing state if available
 	if err := ck.loadState(); err != nil {
@@ -161,13 +183,38 @@ func (ck *ClusterKit) Start() error {
 	}
 
 	// Discover and join known nodes
-	go ck.discoverNodes()
+	if len(ck.knownNodes) > 0 {
+		fmt.Printf("[JOIN] Attempting to join cluster via %v\n", ck.knownNodes)
+		go ck.discoverNodes()
+	} else {
+		fmt.Printf("[JOIN] No known nodes to join (bootstrap=%v)\n", ck.consensusManager.isBootstrap)
+	}
 
 	// Auto-create partitions if bootstrap node and no partitions exist
 	if ck.consensusManager.isBootstrap {
 		go func() {
 			// Wait for leader election
 			time.Sleep(3 * time.Second)
+			
+			// Bootstrap node: Propose self addition through Raft to ensure all nodes have it
+			if ck.consensusManager.IsLeader() {
+				ck.mu.RLock()
+				selfNode := ck.cluster.Nodes[0] // Bootstrap node is always first
+				ck.mu.RUnlock()
+				
+				fmt.Printf("Bootstrap node proposing self through Raft: %s\n", selfNode.ID)
+				if err := ck.consensusManager.ProposeAction("add_node", map[string]interface{}{
+					"id":     selfNode.ID,
+					"name":   selfNode.Name,
+					"ip":     selfNode.IP,
+					"status": selfNode.Status,
+				}); err != nil {
+					fmt.Printf("Warning: Failed to propose bootstrap node: %v\n", err)
+				}
+				
+				// Wait for Raft replication
+				time.Sleep(1 * time.Second)
+			}
 			
 			ck.mu.RLock()
 			replicationFactor := ck.cluster.Config.ReplicationFactor
@@ -267,7 +314,7 @@ func (ck *ClusterKit) GetConsensusManager() *ConsensusManager {
 	return ck.consensusManager
 }
 
-// saveState persists the cluster state to disk
+// saveState persists the cluster state to disk atomically
 func (ck *ClusterKit) saveState() error {
 	ck.mu.RLock()
 	defer ck.mu.RUnlock()
@@ -277,8 +324,16 @@ func (ck *ClusterKit) saveState() error {
 		return fmt.Errorf("failed to marshal state: %v", err)
 	}
 
-	if err := os.WriteFile(ck.stateFile, data, 0644); err != nil {
-		return fmt.Errorf("failed to write state file: %v", err)
+	// Atomic write: write to temp file, then rename
+	tempFile := ck.stateFile + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write temp state file: %v", err)
+	}
+
+	// Atomic rename
+	if err := os.Rename(tempFile, ck.stateFile); err != nil {
+		os.Remove(tempFile) // Clean up temp file on error
+		return fmt.Errorf("failed to rename state file: %v", err)
 	}
 
 	return nil
@@ -301,59 +356,15 @@ func (ck *ClusterKit) loadState() error {
 	return nil
 }
 
-// syncLoop periodically syncs state with other nodes
-func (ck *ClusterKit) syncLoop() {
-	ticker := time.NewTicker(ck.syncInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			ck.syncWithNodes()
-		case <-ck.stopChan:
-			return
-		}
-	}
-}
-
-// syncWithNodes synchronizes state with all known nodes
-func (ck *ClusterKit) syncWithNodes() {
-	ck.mu.RLock()
-	nodes := make([]Node, len(ck.cluster.Nodes))
-	copy(nodes, ck.cluster.Nodes)
-	// Get self node ID (first node in the list is always self)
-	var selfNodeID string
-	if len(nodes) > 0 {
-		selfNodeID = nodes[0].ID
-	}
-	ck.mu.RUnlock()
-
-	for _, node := range nodes {
-		if node.ID == selfNodeID {
-			continue // Skip self
-		}
-
-		if err := ck.syncWithNode(node); err != nil {
-			fmt.Printf("Failed to sync with node %s: %v\n", node.Name, err)
-		}
-	}
-
-	// Save state after sync
-	if err := ck.saveState(); err != nil {
-		fmt.Printf("Failed to save state: %v\n", err)
-	}
-
-	// Update last sync time
-	ck.mu.Lock()
-	ck.lastSync = time.Now()
-	ck.mu.Unlock()
-}
-
 // discoverNodes attempts to connect to known nodes
 func (ck *ClusterKit) discoverNodes() {
+	fmt.Printf("[JOIN] discoverNodes called with %d known nodes\n", len(ck.knownNodes))
 	for _, nodeAddr := range ck.knownNodes {
+		fmt.Printf("[JOIN] Attempting to join %s...\n", nodeAddr)
 		if err := ck.joinNodeWithRetry(nodeAddr, 3); err != nil {
-			fmt.Printf("Failed to join node %s after retries: %v\n", nodeAddr, err)
+			fmt.Printf("[JOIN] Failed to join node %s after retries: %v\n", nodeAddr, err)
+		} else {
+			fmt.Printf("[JOIN] Successfully joined cluster via %s\n", nodeAddr)
 		}
 	}
 }
