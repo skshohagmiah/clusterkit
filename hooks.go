@@ -1,6 +1,7 @@
 package clusterkit
 
 import (
+	"fmt"
 	"sync"
 )
 
@@ -19,13 +20,17 @@ type HookManager struct {
 	hooks              []PartitionChangeHook
 	lastPartitionState map[string]*Partition // partitionID -> Partition
 	mu                 sync.RWMutex
+	workerPool         chan struct{} // Semaphore for limiting concurrent hook executions
 }
 
 // NewHookManager creates a new hook manager
 func newHookManager() *HookManager {
+	// Create a worker pool with max 50 concurrent hook executions
+	workerPool := make(chan struct{}, 50)
 	return &HookManager{
 		hooks:              make([]PartitionChangeHook, 0),
 		lastPartitionState: make(map[string]*Partition),
+		workerPool:         workerPool,
 	}
 }
 
@@ -54,10 +59,24 @@ func (hm *HookManager) checkPartitionChanges(currentPartitions map[string]*Parti
 	// Detect changes
 	changes := hm.detectChanges(hm.lastPartitionState, currentPartitions, cluster)
 
-	// Notify hooks
+	// Notify hooks with goroutine pooling
 	for _, change := range changes {
 		for _, hook := range hm.hooks {
-			go hook(change.PartitionID, change.CopyFromNode, change.CopyToNode) // Call hook in goroutine to not block
+			// Acquire semaphore slot (blocks if pool is full)
+			hm.workerPool <- struct{}{}
+			
+			// Execute hook in goroutine
+			go func(h PartitionChangeHook, partID string, from, to *Node) {
+				defer func() {
+					// Release semaphore slot
+					<-hm.workerPool
+					// Recover from panics in hooks
+					if r := recover(); r != nil {
+						fmt.Printf("Hook panic recovered: %v\n", r)
+					}
+				}()
+				h(partID, from, to)
+			}(hook, change.PartitionID, change.CopyFromNode, change.CopyToNode)
 		}
 	}
 
@@ -176,9 +195,7 @@ func (hm *HookManager) copyPartitionMap(partitions map[string]*Partition) map[st
 	result := make(map[string]*Partition)
 	for id, partition := range partitions {
 		replicas := make([]string, len(partition.ReplicaNodes))
-		for i, r := range partition.ReplicaNodes {
-			replicas[i] = r
-		}
+		copy(replicas, partition.ReplicaNodes)
 
 		result[id] = &Partition{
 			ID:           partition.ID,

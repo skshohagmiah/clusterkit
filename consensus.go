@@ -23,6 +23,8 @@ type ConsensusManager struct {
 	raftDir     string
 	raftBind    string
 	isBootstrap bool
+	transport   *raft.NetworkTransport
+	logStore    *raftboltdb.BoltStore
 }
 
 // LeaderInfo contains information about the current leader
@@ -81,19 +83,44 @@ func (f *clusterFSM) applyAddNode(data interface{}) error {
 		return fmt.Errorf("invalid node data")
 	}
 
-	node := Node{
-		ID:     nodeData["id"].(string),
-		Name:   nodeData["name"].(string),
-		IP:     nodeData["ip"].(string),
-		Status: nodeData["status"].(string),
+	// Safe type assertions with validation
+	id, ok := nodeData["id"].(string)
+	if !ok || id == "" {
+		return fmt.Errorf("invalid or missing node ID")
+	}
+	name, ok := nodeData["name"].(string)
+	if !ok || name == "" {
+		return fmt.Errorf("invalid or missing node name")
+	}
+	ip, ok := nodeData["ip"].(string)
+	if !ok || ip == "" {
+		return fmt.Errorf("invalid or missing node IP")
+	}
+	status, ok := nodeData["status"].(string)
+	if !ok || status == "" {
+		status = "active" // Default status
 	}
 
+	node := Node{
+		ID:     id,
+		Name:   name,
+		IP:     ip,
+		Status: status,
+	}
+
+	// Lock cluster state for thread-safe modification
+	f.ck.mu.Lock()
+	
+	fmt.Printf("[DEBUG] applyAddNode called for %s (current nodes: %d)\n", node.ID, len(f.ck.cluster.Nodes))
+	
 	// Check if node already exists
 	for i, existing := range f.ck.cluster.Nodes {
 		if existing.ID == node.ID {
 			// Update existing node
 			f.ck.cluster.Nodes[i] = node
-			fmt.Printf("✓ Updated node: %s\n", node.ID)
+			f.ck.cluster.rebuildNodeMap() // Rebuild map after update
+			f.ck.mu.Unlock()
+			fmt.Printf("✓ Updated node: %s (total nodes: %d)\n", node.ID, len(f.ck.cluster.Nodes))
 			return nil
 		}
 	}
@@ -101,10 +128,13 @@ func (f *clusterFSM) applyAddNode(data interface{}) error {
 	// Add new node
 	f.ck.cluster.Nodes = append(f.ck.cluster.Nodes, node)
 	f.ck.cluster.rebuildNodeMap() // Rebuild map for O(1) lookups
-	fmt.Printf("✓ Added node: %s\n", node.ID)
+	f.ck.mu.Unlock()
 	
-	// Trigger automatic partition rebalancing
-	go f.ck.triggerRebalance()
+	fmt.Printf("✓ Added node: %s (total nodes: %d)\n", node.ID, len(f.ck.cluster.Nodes))
+	
+	// DO NOT trigger rebalancing here - it causes race conditions
+	// Rebalancing should be triggered explicitly by the leader after consensus
+	// or automatically after a stabilization period
 	
 	return nil
 }
@@ -112,10 +142,14 @@ func (f *clusterFSM) applyAddNode(data interface{}) error {
 // applyRemoveNode removes a node from the cluster
 func (f *clusterFSM) applyRemoveNode(data interface{}) error {
 	nodeID, ok := data.(string)
-	if !ok {
-		return fmt.Errorf("invalid node ID")
+	if !ok || nodeID == "" {
+		return fmt.Errorf("invalid or empty node ID")
 	}
 
+	// Lock cluster state for thread-safe modification
+	f.ck.mu.Lock()
+	defer f.ck.mu.Unlock()
+	
 	for i, node := range f.ck.cluster.Nodes {
 		if node.ID == nodeID {
 			f.ck.cluster.Nodes = append(f.ck.cluster.Nodes[:i], f.ck.cluster.Nodes[i+1:]...)
@@ -135,6 +169,10 @@ func (f *clusterFSM) applyCreatePartitions(data interface{}) error {
 		return fmt.Errorf("invalid partition data")
 	}
 
+	// Lock cluster state for thread-safe modification
+	f.ck.mu.Lock()
+	defer f.ck.mu.Unlock()
+	
 	if f.ck.cluster.PartitionMap == nil {
 		f.ck.cluster.PartitionMap = &PartitionMap{
 			Partitions: make(map[string]*Partition),
@@ -148,18 +186,41 @@ func (f *clusterFSM) applyCreatePartitions(data interface{}) error {
 	}
 
 	for partID, partRaw := range partitionsRaw {
-		partMap := partRaw.(map[string]interface{})
+		partMap, ok := partRaw.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("invalid partition data for %s", partID)
+		}
+		
+		primaryNode, ok := partMap["primary_node"].(string)
+		if !ok || primaryNode == "" {
+			return fmt.Errorf("invalid primary_node for partition %s", partID)
+		}
+		
+		// Validate that primary node exists in NodeMap
+		if _, exists := f.ck.cluster.NodeMap[primaryNode]; !exists {
+			fmt.Printf("Warning: primary node %s for partition %s not in NodeMap yet, skipping\n", primaryNode, partID)
+			continue
+		}
 		
 		partition := &Partition{
 			ID:          partID,
-			PrimaryNode: partMap["primary_node"].(string),
+			PrimaryNode: primaryNode,
 		}
 
-		// Extract replica nodes
+		// Extract replica nodes with safe type assertions
 		if replicas, ok := partMap["replica_nodes"].([]interface{}); ok {
-			partition.ReplicaNodes = make([]string, len(replicas))
+			partition.ReplicaNodes = make([]string, 0, len(replicas))
 			for i, r := range replicas {
-				partition.ReplicaNodes[i] = r.(string)
+				if replicaID, ok := r.(string); ok && replicaID != "" {
+					// Validate that replica node exists in NodeMap
+					if _, exists := f.ck.cluster.NodeMap[replicaID]; !exists {
+						fmt.Printf("Warning: replica node %s for partition %s not in NodeMap yet, skipping\n", replicaID, partID)
+						continue
+					}
+					partition.ReplicaNodes = append(partition.ReplicaNodes, replicaID)
+				} else {
+					fmt.Printf("Warning: invalid replica node at index %d for partition %s\n", i, partID)
+				}
 			}
 		}
 
@@ -181,6 +242,10 @@ func (f *clusterFSM) applyRebalancePartitions(data interface{}) error {
 		return fmt.Errorf("invalid partition data")
 	}
 
+	// Lock cluster state for thread-safe modification
+	f.ck.mu.Lock()
+	defer f.ck.mu.Unlock()
+	
 	if f.ck.cluster.PartitionMap == nil {
 		return fmt.Errorf("no partition map exists")
 	}
@@ -191,22 +256,78 @@ func (f *clusterFSM) applyRebalancePartitions(data interface{}) error {
 		return fmt.Errorf("invalid partitions map")
 	}
 
+	skippedPartitions := 0
+	updatedPartitions := 0
+
 	for partID, partRaw := range partitionsRaw {
-		partMap := partRaw.(map[string]interface{})
-		
-		if partition, exists := f.ck.cluster.PartitionMap.Partitions[partID]; exists {
-			partition.PrimaryNode = partMap["primary_node"].(string)
-			
-			if replicas, ok := partMap["replica_nodes"].([]interface{}); ok {
-				partition.ReplicaNodes = make([]string, len(replicas))
-				for i, r := range replicas {
-					partition.ReplicaNodes[i] = r.(string)
-				}
-			}
+		partMap, ok := partRaw.(map[string]interface{})
+		if !ok {
+			fmt.Printf("Warning: invalid partition data for %s during rebalance\n", partID)
+			skippedPartitions++
+			continue
 		}
+		
+		partition, exists := f.ck.cluster.PartitionMap.Partitions[partID]
+		if !exists {
+			fmt.Printf("Warning: partition %s not found during rebalance\n", partID)
+			skippedPartitions++
+			continue
+		}
+
+		// Validate primary node first
+		primaryNode, ok := partMap["primary_node"].(string)
+		if !ok || primaryNode == "" {
+			fmt.Printf("Warning: invalid primary node for partition %s during rebalance\n", partID)
+			skippedPartitions++
+			continue
+		}
+
+		if _, nodeExists := f.ck.cluster.NodeMap[primaryNode]; !nodeExists {
+			fmt.Printf("Warning: primary node %s for partition %s not in NodeMap during rebalance, skipping partition\n", primaryNode, partID)
+			skippedPartitions++
+			continue
+		}
+
+		// Validate all replicas before applying
+		replicas, ok := partMap["replica_nodes"].([]interface{})
+		if !ok {
+			fmt.Printf("Warning: invalid replica nodes for partition %s during rebalance\n", partID)
+			skippedPartitions++
+			continue
+		}
+
+		validReplicas := make([]string, 0, len(replicas))
+		allReplicasValid := true
+		for _, r := range replicas {
+			replicaID, ok := r.(string)
+			if !ok || replicaID == "" {
+				allReplicasValid = false
+				break
+			}
+			if _, nodeExists := f.ck.cluster.NodeMap[replicaID]; !nodeExists {
+				fmt.Printf("Warning: replica node %s for partition %s not in NodeMap during rebalance, skipping partition\n", replicaID, partID)
+				allReplicasValid = false
+				break
+			}
+			validReplicas = append(validReplicas, replicaID)
+		}
+
+		if !allReplicasValid {
+			skippedPartitions++
+			continue
+		}
+
+		// All validations passed - apply the update
+		partition.PrimaryNode = primaryNode
+		partition.ReplicaNodes = validReplicas
+		updatedPartitions++
 	}
 
-	fmt.Printf("✓ Rebalanced partitions\n")
+	if skippedPartitions > 0 {
+		fmt.Printf("⚠ Rebalanced %d partitions, skipped %d partitions due to missing nodes\n", updatedPartitions, skippedPartitions)
+	} else {
+		fmt.Printf("✓ Rebalanced %d partitions\n", updatedPartitions)
+	}
 	
 	// Notify hooks about partition changes
 	f.ck.hookManager.checkPartitionChanges(f.ck.cluster.PartitionMap.Partitions, f.ck.cluster)
@@ -221,7 +342,10 @@ func (f *clusterFSM) applyUpdatePartition(data interface{}) error {
 		return fmt.Errorf("invalid partition data")
 	}
 
-	partID := partitionData["id"].(string)
+	partID, ok := partitionData["id"].(string)
+	if !ok || partID == "" {
+		return fmt.Errorf("invalid or missing partition ID")
+	}
 	
 	if f.ck.cluster.PartitionMap == nil {
 		return fmt.Errorf("no partition map exists")
@@ -237,9 +361,11 @@ func (f *clusterFSM) applyUpdatePartition(data interface{}) error {
 	}
 
 	if replicas, ok := partitionData["replica_nodes"].([]interface{}); ok {
-		partition.ReplicaNodes = make([]string, len(replicas))
-		for i, r := range replicas {
-			partition.ReplicaNodes[i] = r.(string)
+		partition.ReplicaNodes = make([]string, 0, len(replicas))
+		for _, r := range replicas {
+			if replicaID, ok := r.(string); ok && replicaID != "" {
+				partition.ReplicaNodes = append(partition.ReplicaNodes, replicaID)
+			}
 		}
 	}
 
@@ -252,9 +378,31 @@ func (f *clusterFSM) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	// Create snapshot of cluster state
+	// Create a deep copy of cluster state to avoid holding locks during snapshot
+	f.ck.mu.RLock()
+	clusterCopy := *f.ck.cluster
+	clusterCopy.Nodes = make([]Node, len(f.ck.cluster.Nodes))
+	copy(clusterCopy.Nodes, f.ck.cluster.Nodes)
+	
+	// Deep copy partition map
+	if f.ck.cluster.PartitionMap != nil {
+		clusterCopy.PartitionMap = &PartitionMap{
+			Partitions: make(map[string]*Partition),
+		}
+		for k, v := range f.ck.cluster.PartitionMap.Partitions {
+			partCopy := &Partition{
+				ID:           v.ID,
+				PrimaryNode:  v.PrimaryNode,
+				ReplicaNodes: make([]string, len(v.ReplicaNodes)),
+			}
+			copy(partCopy.ReplicaNodes, v.ReplicaNodes)
+			clusterCopy.PartitionMap.Partitions[k] = partCopy
+		}
+	}
+	f.ck.mu.RUnlock()
+
 	return &clusterSnapshot{
-		cluster: f.ck.GetCluster(),
+		cluster: &clusterCopy,
 	}, nil
 }
 
@@ -264,13 +412,26 @@ func (f *clusterFSM) Restore(rc io.ReadCloser) error {
 
 	var cluster Cluster
 	if err := json.NewDecoder(rc).Decode(&cluster); err != nil {
-		return err
+		return fmt.Errorf("failed to decode snapshot: %v", err)
+	}
+
+	// Validate restored state
+	if cluster.ID == "" {
+		return fmt.Errorf("invalid snapshot: cluster ID is empty")
+	}
+	if cluster.Config == nil {
+		return fmt.Errorf("invalid snapshot: cluster config is nil")
 	}
 
 	f.mu.Lock()
+	f.ck.mu.Lock()
 	f.ck.cluster = &cluster
+	// Rebuild NodeMap for O(1) lookups
+	f.ck.cluster.rebuildNodeMap()
+	f.ck.mu.Unlock()
 	f.mu.Unlock()
 
+	fmt.Println("✓ Restored cluster state from snapshot")
 	return nil
 }
 
@@ -351,6 +512,7 @@ func (cm *ConsensusManager) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to create raft transport: %v", err)
 	}
+	cm.transport = transport
 
 	// Create the snapshot store
 	snapshots, err := raft.NewFileSnapshotStore(cm.raftDir, 2, os.Stderr)
@@ -363,6 +525,7 @@ func (cm *ConsensusManager) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to create bolt store: %v", err)
 	}
+	cm.logStore = logStore
 
 	// Instantiate the Raft system
 	ra, err := raft.NewRaft(config, cm.fsm, logStore, logStore, snapshots, transport)
@@ -374,16 +537,30 @@ func (cm *ConsensusManager) Start() error {
 
 	// Bootstrap cluster if this is the first node
 	if cm.isBootstrap {
-		configuration := raft.Configuration{
-			Servers: []raft.Server{
-				{
-					ID:      config.LocalID,
-					Address: transport.LocalAddr(),
-				},
-			},
+		// Check if already bootstrapped to avoid errors on restart
+		future := cm.raft.GetConfiguration()
+		if err := future.Error(); err != nil {
+			return fmt.Errorf("failed to get raft configuration: %v", err)
 		}
-		cm.raft.BootstrapCluster(configuration)
-		fmt.Println("✓ Bootstrapped Raft cluster")
+		
+		// Only bootstrap if no servers exist
+		if len(future.Configuration().Servers) == 0 {
+			configuration := raft.Configuration{
+				Servers: []raft.Server{
+					{
+						ID:      config.LocalID,
+						Address: transport.LocalAddr(),
+					},
+				},
+			}
+			if err := cm.raft.BootstrapCluster(configuration).Error(); err != nil {
+				fmt.Printf("Warning: Bootstrap failed (may already be bootstrapped): %v\n", err)
+			} else {
+				fmt.Println("✓ Bootstrapped Raft cluster")
+			}
+		} else {
+			fmt.Println("✓ Raft cluster already bootstrapped, skipping")
+		}
 	}
 
 	fmt.Printf("✓ Raft consensus started on %s\n", cm.raftBind)
@@ -392,9 +569,34 @@ func (cm *ConsensusManager) Start() error {
 
 // Stop stops the consensus manager
 func (cm *ConsensusManager) Stop() error {
+	var errs []error
+	
+	// Shutdown Raft
 	if cm.raft != nil {
-		return cm.raft.Shutdown().Error()
+		if err := cm.raft.Shutdown().Error(); err != nil {
+			errs = append(errs, fmt.Errorf("raft shutdown: %v", err))
+		}
 	}
+	
+	// Close transport
+	if cm.transport != nil {
+		if err := cm.transport.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("transport close: %v", err))
+		}
+	}
+	
+	// Close BoltDB store
+	if cm.logStore != nil {
+		if err := cm.logStore.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("logstore close: %v", err))
+		}
+	}
+	
+	if len(errs) > 0 {
+		return fmt.Errorf("consensus shutdown errors: %v", errs)
+	}
+	
+	fmt.Println("✓ Consensus manager stopped cleanly")
 	return nil
 }
 
