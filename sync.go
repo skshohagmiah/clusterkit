@@ -264,8 +264,8 @@ func (ck *ClusterKit) handleGetCluster(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"cluster": clusterCopy,
 		"hash_config": map[string]interface{}{
-			"algorithm": "fnv1a",
-			"seed":      0,
+			"algorithm": "md5",
+			"encoding":  "big_endian_uint32",
 			"modulo":    clusterCopy.Config.PartitionCount,
 			"format":    "partition-%d",
 		},

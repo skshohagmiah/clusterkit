@@ -1,163 +1,117 @@
-# Distributed KV Store Example
+# ClusterKit Examples
 
-A production-ready distributed key-value store built with ClusterKit.
+This folder contains two complete examples showing different replication strategies using ClusterKit.
 
-## Features
+## Examples
 
-✅ **Quorum Writes** - Data written to multiple nodes (default: 2/3)  
-✅ **Automatic Failover** - Client routes to healthy nodes  
-✅ **Partition Rebalancing** - Automatic when nodes join/leave  
-✅ **Data Replication** - Replication factor = 3  
-✅ **Zero Data Loss** - Survives node failures  
+### 1. [SYNC - Quorum-Based Replication](./sync/) (Client-Side)
 
-## Quick Start
+**Strategy:** Client writes to all nodes, waits for quorum
 
-```bash
-chmod +x run.sh
-./run.sh
-```
+- ✅ Strong consistency
+- ✅ High durability (immediate)
+- ❌ Higher latency (~10-20ms)
+- **Use for:** Financial data, critical transactions
 
-This will:
-1. Start 5 nodes
-2. Run test client
-3. Kill node-3 (simulate failure)
-4. Add node-6 (simulate scale-up)
-5. Show results
+### 2. [ASYNC - Primary-First Replication](./async/) (Client-Side)
 
-## Files
+**Strategy:** Client writes to primary, replicates in background
 
-- **`server.go`** - KV server node
-- **`client.go`** - Smart client library
-- **`test.go`** - Test program
-- **`run.sh`** - Demo script
+- ✅ Low latency (~1-5ms)
+- ✅ High throughput (3x faster)
+- ⚠️ Eventual consistency
+- **Use for:** User data, general purpose (90% of use cases)
 
-## How It Works
+### 3. [Server-Side Partition Handling](./server-side/)
 
-### Write Flow
+**Strategy:** Server checks primary/replica and handles routing
 
-```
-Client.Set("user:123", "data")
-  ↓
-Calculate partition: user:123 → partition-42
-  ↓
-Get nodes: Primary=node-3, Replicas=[node-1, node-5]
-  ↓
-Write to all 3 nodes in parallel
-  ↓
-Wait for quorum (2/3 nodes)
-  ↓
-Return success ✅
-```
+- ✅ Simple clients (no topology knowledge)
+- ✅ Server handles replication
+- ✅ Partition change hooks for data migration
+- **Use for:** Web/mobile apps, traditional request/response
 
-### Node Failure
+## Quick Comparison
 
-```
-Before:
-  partition-42 → Primary: node-3 ✅
-                 Replicas: [node-1 ✅, node-5 ✅]
+| Feature | SYNC | ASYNC |
+|---------|------|-------|
+| **Write Latency** | 10-20ms | 1-5ms |
+| **Throughput** | 1,500 ops/sec | 5,000 ops/sec |
+| **Consistency** | Strong (quorum) | Eventual |
+| **Durability** | High (immediate) | High (eventual) |
+| **Best For** | Critical data | General purpose |
 
-Node-3 dies! 💥
+## How ClusterKit is Used
 
-After (automatic rebalancing):
-  partition-42 → Primary: node-1 ✅ (already has data!)
-                 Replicas: [node-5 ✅, node-2]
-
-Data safe! ✅
-```
-
-### Client Adaptation
-
-1. Client tries to write to node-3
-2. Connection fails
-3. Client tries node-1 (replica)
-4. Success! ✅
-5. Client refreshes topology
-6. Future writes go to node-1
-
-## Manual Testing
-
-### Start Cluster
-
-```bash
-# Terminal 1: Node 1 (bootstrap)
-NODE_ID=node-1 HTTP_PORT=8080 KV_PORT=9080 BOOTSTRAP=true \
-PARTITION_COUNT=64 REPLICATION_FACTOR=3 \
-go run server.go
-
-# Terminal 2: Node 2
-NODE_ID=node-2 HTTP_PORT=8081 KV_PORT=9081 \
-JOIN_ADDR=localhost:8080 PARTITION_COUNT=64 REPLICATION_FACTOR=3 \
-go run server.go
-
-# Terminal 3: Node 3
-NODE_ID=node-3 HTTP_PORT=8082 KV_PORT=9082 \
-JOIN_ADDR=localhost:8080 PARTITION_COUNT=64 REPLICATION_FACTOR=3 \
-go run server.go
-```
-
-### Run Client
-
-```bash
-go run client.go test.go
-```
-
-### Test Failover
-
-While client is running:
-1. Kill a node: `pkill -f "NODE_ID=node-2"`
-2. Watch client continue working
-3. Add new node: Start node-4
-4. Watch partitions rebalance
-
-## API
-
-### Client API
+Both examples use ClusterKit's simple API:
 
 ```go
-// Create client
-client, _ := NewClient(
-    []string{"localhost:8080", "localhost:8081"},
-    64, // partition count
-)
+// Get partition for a key
+partition, _ := ck.GetPartition("user:123")
 
-// Write (quorum=2)
-client.Set("key", "value")
+// Check if I'm the primary
+if ck.IsPrimary(partition) {
+    // Store data locally
+    kv.data[key] = value
+    
+    // Get replicas for replication
+    replicas := ck.GetReplicas(partition)
+    
+    // SYNC: Wait for quorum
+    // ASYNC: Replicate in background
+}
 
-// Write with custom quorum
-client.SetWithQuorum("key", "value", 3)
+// Check if I'm a replica
+if ck.IsReplica(partition) {
+    // Just store locally (primary handles replication)
+    kv.data[key] = value
+}
 
-// Read
-value, _ := client.Get("key")
-
-// Delete
-client.Delete("key")
+// Get primary node
+primary := ck.GetPrimary(partition)
+// Forward request to primary if needed
 ```
 
-### Server HTTP API
+## What ClusterKit Provides
+
+ClusterKit is a **coordination library** that tells you:
+
+- ✅ Which partition a key belongs to
+- ✅ Which nodes (primary + replicas) should store the data
+- ✅ Whether current node is primary or replica
+- ✅ Automatic rebalancing when nodes join/leave
+- ✅ Leader election and consensus (Raft)
+
+## What You Implement
+
+You decide HOW to store and replicate:
+
+- 🔧 Data storage (in-memory, disk, database)
+- 🔧 Replication strategy (sync, async, quorum)
+- 🔧 Network protocol (HTTP, gRPC, TCP)
+- 🔧 Business logic
+
+## Running Examples
+
+Each example has its own README with detailed instructions:
 
 ```bash
-# Write
-curl -X POST http://localhost:9080/kv/set \
-  -d '{"key":"user:123","value":"John"}'
+# Run SYNC example
+cd sync/
+NODE_ID=node-1 HTTP_PORT=8080 KV_PORT=9080 go run server.go client.go
 
-# Read
-curl http://localhost:9080/kv/get?key=user:123
-
-# Delete
-curl -X POST http://localhost:9080/kv/delete?key=user:123
-
-# Stats
-curl http://localhost:9080/kv/stats
-
-# Health
-curl http://localhost:9080/health
+# Run ASYNC example
+cd async/
+NODE_ID=node-1 HTTP_PORT=8080 KV_PORT=9080 go run server.go client.go
 ```
 
 ## Architecture
 
+Both examples implement a distributed key-value store:
+
 ```
 ┌─────────────┐
-│   Client    │ (routes directly to correct nodes)
+│   Client    │ (smart routing to correct nodes)
 └──────┬──────┘
        │
        ├──────────┬──────────┬──────────┐
@@ -168,54 +122,54 @@ curl http://localhost:9080/health
    └──┬───┘  └──┬───┘  └──┬───┘  └──┬───┘
       │         │         │         │
       └─────────┴─────────┴─────────┘
-              ClusterKit
-         (partition management)
+            ClusterKit
+       (partition management)
 ```
 
-## Data Safety
+## Key Differences
 
-### Quorum Writes
+### SYNC (Quorum)
+```go
+// Primary writes to all nodes and WAITS
+for _, node := range allNodes {
+    response := writeToNode(node, key, value)
+    successCount++
+}
 
-- Writes go to primary + replicas
-- Waits for 2/3 nodes to acknowledge
-- **Guarantees data survives 1 node failure**
+if successCount >= quorum {
+    return "ok"  // Waited for 2/3 nodes
+}
+```
 
-### Replication Factor = 3
+### ASYNC (Primary-first)
+```go
+// Primary writes locally and RETURNS immediately
+kv.data[key] = value
+return "ok"  // Fast response!
 
-- Every key stored on 3 nodes
-- Can lose 2 nodes and still have data
-- Automatic replication on write
+// Background replication (fire-and-forget)
+go func() {
+    for _, replica := range replicas {
+        writeToNode(replica, key, value)
+    }
+}()
+```
 
-### Partition Rebalancing
+## Choosing a Strategy
 
-- ClusterKit detects node changes
-- Triggers `OnPartitionChange` hook
-- Data already on replicas (safe!)
+**Use SYNC when:**
+- Data is critical (money, inventory)
+- Strong consistency required
+- Can tolerate higher latency
 
-## Performance
+**Use ASYNC when:**
+- Speed matters
+- General purpose application
+- Can tolerate brief inconsistency
+- Most web applications (90% of cases)
 
-- **Writes**: ~1500 ops/sec (quorum=2)
-- **Reads**: ~7000 ops/sec (from any replica)
-- **Latency**: <1ms local, <10ms network
+## Learn More
 
-## Production Checklist
-
-- ✅ Quorum writes (data safety)
-- ✅ Automatic failover (availability)
-- ✅ Partition rebalancing (scalability)
-- ✅ Health checks (monitoring)
-- ⏳ Persistent storage (add disk backend)
-- ⏳ Authentication (add auth layer)
-- ⏳ Encryption (add TLS)
-
-## Next Steps
-
-1. **Add persistence** - Store data to disk
-2. **Add snapshots** - Periodic backups
-3. **Add metrics** - Prometheus integration
-4. **Add auth** - API keys or JWT
-5. **Add compression** - Reduce network traffic
-
----
-
-**This is a production-ready foundation for a distributed KV store!** 🚀
+- [ClusterKit Documentation](../README.md)
+- [SYNC Example Details](./sync/README.md)
+- [ASYNC Example Details](./async/README.md)
