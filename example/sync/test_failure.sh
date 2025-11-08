@@ -72,7 +72,18 @@ echo ""
 # Kill node-3
 echo "❌ KILLING node-3 (PID: $PID3)..."
 kill -9 $PID3
-echo "Waiting for health checker to detect failure (15s = 3 checks × 5s interval)..."
+wait $PID3 2>/dev/null || true
+echo "✓ Node-3 process terminated"
+
+# Verify port is closed
+sleep 1
+if curl -s --max-time 1 http://localhost:8082/ready > /dev/null 2>&1; then
+    echo "⚠️  WARNING: Port 8082 still responding!"
+else
+    echo "✓ Port 8082 is closed"
+fi
+echo ""
+echo "Waiting for health checker to detect failure (20s = 4 checks × 5s interval)..."
 sleep 2
 echo ""
 
@@ -92,7 +103,16 @@ echo ""
 
 # Wait for health checker to remove the node
 echo "Waiting for automatic removal (health checks: 5s interval, 3 failures = 15s)..."
-sleep 18
+echo "Health check cycles:"
+for i in {1..5}; do
+    sleep 5
+    NODE_COUNT=$(curl -s http://localhost:8080/cluster | jq '.cluster.nodes | length')
+    echo "  Cycle $i/5 ($(($i * 5))s elapsed) - Nodes: $NODE_COUNT"
+    if [ "$NODE_COUNT" -eq 2 ]; then
+        echo "  ✅ Node removed!"
+        break
+    fi
+done
 echo ""
 
 # Check cluster state after automatic removal
@@ -135,6 +155,11 @@ if [ "$read_fail" -gt 0 ]; then
 else
     echo "✅ All reads successful after automatic rebalancing!"
 fi
+echo ""
+
+# Wait a bit more to ensure node stays dead
+echo "Ensuring node-3 stays dead for proper testing..."
+sleep 5
 echo ""
 
 # Restart node-3

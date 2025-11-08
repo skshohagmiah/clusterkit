@@ -17,18 +17,19 @@
 
 **Result:** New node automatically gets its share of partitions and data.
 
-### ❌ Node LEAVE/FAILURE - NOT Automated
+### ✅ Node LEAVE/FAILURE - NOW AUTOMATED!
 
 ```
 1. Node dies/crashes
-2. ❌ NO automatic detection
-3. ❌ Node stays in cluster.Nodes[] forever
-4. ❌ Partitions still assigned to dead node
-5. ❌ Reads/writes to those partitions FAIL
-6. ⚠️ Manual intervention required
+2. ✅ Health checker detects failure (checks every 5s)
+3. ✅ After 3 failed checks (~15s), leader removes node
+4. ✅ Node removed from Raft cluster
+5. ✅ Partitions automatically rebalanced
+6. ✅ Data migration hooks fire
+7. ✅ Cluster continues operating
 ```
 
-**Result:** Cluster becomes partially unavailable until manual cleanup.
+**Result:** Cluster automatically recovers from node failures!
 
 ## What Happens in Each Scenario
 
