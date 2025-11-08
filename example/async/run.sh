@@ -22,7 +22,9 @@ cleanup() {
     echo ""
     echo "Cleaning up..."
     pkill -f "NODE_ID=node-" || true
-    rm -rf /tmp/ck-node* /tmp/kv-*.log
+    killall -9 server 2>/dev/null || true  # Kill compiled binaries
+    rm -rf /tmp/ck-node*
+    rm -rf clusterkit-data  # Clean local state
     echo "✓ Cleanup complete"
 }
 
@@ -30,6 +32,10 @@ trap cleanup EXIT
 
 # Clean start
 cleanup
+
+# Create logs directory
+mkdir -p logs
+rm -f logs/*.log
 
 # Start nodes
 echo "Starting $NUM_NODES nodes..."
@@ -49,7 +55,7 @@ for i in $(seq 1 $NUM_NODES); do
         NODE_ID=$NODE_ID HTTP_PORT=$HTTP_PORT KV_PORT=$KV_PORT \
         PARTITION_COUNT=$PARTITIONS REPLICATION_FACTOR=$REPLICATION \
         DATA_DIR=$DATA_DIR \
-        go run server.go > /tmp/kv-node$i.log 2>&1 &
+        go run server.go > logs/node-$i.log 2>&1 &
     else
         # Join existing cluster
         echo "🔗 Starting $NODE_ID (joining) on ports $HTTP_PORT/$KV_PORT"
@@ -57,7 +63,7 @@ for i in $(seq 1 $NUM_NODES); do
         JOIN_ADDR=localhost:8080 \
         PARTITION_COUNT=$PARTITIONS REPLICATION_FACTOR=$REPLICATION \
         DATA_DIR=$DATA_DIR \
-        go run server.go > /tmp/kv-node$i.log 2>&1 &
+        go run server.go > logs/node-$i.log 2>&1 &
     fi
     
     sleep 2
@@ -77,7 +83,7 @@ echo "Nodes in cluster: $JOINED_NODES / $NUM_NODES"
 
 if [ "$JOINED_NODES" -lt "$NUM_NODES" ]; then
     echo "⚠️  Warning: Not all nodes joined successfully"
-    echo "Check logs: /tmp/kv-node*.log"
+    echo "Check logs: logs/node-*.log"
 fi
 
 # Show cluster status
@@ -93,67 +99,12 @@ echo "  Testing ASYNC Mode (Primary-First)"
 echo "=========================================="
 echo ""
 
-# Test writes
-echo "⚡ Writing 1000 keys (primary-first, fast!)..."
-start_time=$(date +%s)
-write_success=0
-write_fail=0
-
-for i in $(seq 1 1000); do
-    if curl -s -X POST http://localhost:9080/kv/set \
-        -H "Content-Type: application/json" \
-        -d "{\"key\":\"user:$i\",\"value\":\"User $i\"}" > /dev/null 2>&1; then
-        write_success=$((write_success + 1))
-    else
-        write_fail=$((write_fail + 1))
-    fi
-    
-    if [ $((i % 100)) -eq 0 ]; then
-        echo "  ✓ Wrote $i keys..."
-    fi
-done
-
-write_duration=$(($(date +%s) - start_time))
-write_ops_per_sec=$((write_success / write_duration))
-
-echo ""
-echo "✅ Write Results:"
-echo "  Success: $write_success"
-echo "  Failed: $write_fail"
-echo "  Duration: ${write_duration}s"
-echo "  Throughput: ${write_ops_per_sec} ops/sec"
+# Run the smart client test
+go run cmd/test_client/*.go 1000
 
 echo ""
 echo "⏱️  Waiting for background replication (3s)..."
 sleep 3
-
-echo ""
-echo "📖 Reading 1000 keys from replicas..."
-start_time=$(date +%s)
-read_success=0
-read_fail=0
-
-for i in $(seq 1 1000); do
-    if curl -s http://localhost:9081/kv/get?key=user:$i > /dev/null 2>&1; then
-        read_success=$((read_success + 1))
-    else
-        read_fail=$((read_fail + 1))
-    fi
-    
-    if [ $((i % 100)) -eq 0 ]; then
-        echo "  ✓ Read $i keys..."
-    fi
-done
-
-read_duration=$(($(date +%s) - start_time))
-read_ops_per_sec=$((read_success / read_duration))
-
-echo ""
-echo "✅ Read Results:"
-echo "  Success: $read_success"
-echo "  Failed: $read_fail"
-echo "  Duration: ${read_duration}s"
-echo "  Throughput: ${read_ops_per_sec} ops/sec"
 
 echo ""
 echo "📊 Node Statistics:"
@@ -178,7 +129,7 @@ echo ""
 echo "  # Read from any node"
 echo "  curl http://localhost:9081/kv/get?key=test"
 echo ""
-echo "Logs: /tmp/kv-node*.log"
+echo "Logs: logs/node-*.log"
 echo ""
 
 # Keep running

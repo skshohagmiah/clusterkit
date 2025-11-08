@@ -206,9 +206,15 @@ func main() {
 	httpPort := os.Getenv("HTTP_PORT")
 	kvPort := os.Getenv("KV_PORT")
 	joinAddr := os.Getenv("JOIN_ADDR")
+	dataDir := os.Getenv("DATA_DIR")
 
 	if nodeID == "" || httpPort == "" || kvPort == "" {
 		log.Fatal("NODE_ID, HTTP_PORT, and KV_PORT required")
+	}
+
+	// Default data directory if not provided
+	if dataDir == "" {
+		dataDir = "./clusterkit-data"
 	}
 
 	// Initialize ClusterKit
@@ -216,6 +222,7 @@ func main() {
 		NodeID:            nodeID,
 		HTTPAddr:          ":" + httpPort,
 		JoinAddr:          joinAddr,
+		DataDir:           dataDir,
 		PartitionCount:    64,
 		ReplicationFactor: 3,
 		Bootstrap:         joinAddr == "",

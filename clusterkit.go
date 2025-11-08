@@ -481,17 +481,19 @@ func generateNodeName(nodeID string) string {
 }
 
 // calculateRaftAddr auto-calculates Raft address from HTTP address
-// Examples: ":8080" -> "127.0.0.1:9001", ":8081" -> "127.0.0.1:9002"
+// Examples: ":8080" -> "127.0.0.1:10001", ":8081" -> "127.0.0.1:10002"
+// Uses port range 10001+ to avoid conflicts with common application ports (9000-9999)
 func calculateRaftAddr(httpAddr string) string {
 	var port int
 	
 	// Try to extract port from HTTP address
 	if _, err := fmt.Sscanf(httpAddr, ":%d", &port); err == nil {
-		// Calculate Raft port: 9001 + (httpPort - 8080)
-		raftPort := 9001 + (port - 8080)
+		// Calculate Raft port: 10001 + (httpPort - 8080)
+		// This ensures Raft ports are in the 10000+ range, avoiding conflicts
+		raftPort := 10001 + (port - 8080)
 		return fmt.Sprintf("127.0.0.1:%d", raftPort)
 	}
 	
-	// Default to 9001
-	return "127.0.0.1:9001"
+	// Default to 10001
+	return "127.0.0.1:10001"
 }
