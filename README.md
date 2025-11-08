@@ -1,7 +1,5 @@
 # ClusterKit
 
-<div align="center">
-
 **A lightweight, production-ready distributed cluster coordination library for Go**
 
 [![Go Version](https://img.shields.io/badge/Go-1.19+-00ADD8?style=flat&logo=go)](https://go.dev/)
@@ -10,11 +8,9 @@
 [![Documentation](https://img.shields.io/badge/docs-latest-blue.svg)](./docs)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-**ClusterKit handles cluster coordination so you can focus on building your application.**
+ClusterKit handles cluster coordination so you can focus on building your application.
 
 [Features](#-key-features) • [Quick Start](#-quick-start) • [Documentation](#-documentation) • [Examples](#-examples)
-
-</div>
 
 ---
 
