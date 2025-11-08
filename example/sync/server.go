@@ -155,6 +155,18 @@ func (kv *KVStore) handleMigrate(w http.ResponseWriter, r *http.Request) {
 // handlePartitionChange is called when a partition is reassigned
 // syncAllPartitionsOnRejoin syncs all partitions when this node rejoins
 func (kv *KVStore) syncAllPartitionsOnRejoin() {
+	log.Printf("[KV-%s] 🗑️  Clearing all local data (stale after offline period)\n", kv.nodeID)
+	
+	// STRATEGY 1: Clear all existing data (RECOMMENDED for production)
+	// This ensures no stale data remains
+	kv.mu.Lock()
+	kv.data = make(map[string]string) // Clear everything!
+	kv.mu.Unlock()
+	
+	// STRATEGY 2 (Alternative): Keep local data and merge
+	// Use this if you want to preserve local writes during offline period
+	// But you'll need conflict resolution (version vectors, last-write-wins, etc.)
+	
 	// Get all partitions this node should have
 	cluster := kv.ck.GetCluster()
 	if cluster.PartitionMap == nil {
@@ -231,14 +243,15 @@ func (kv *KVStore) syncPartitionData(partitionID string, sourceNodes []*clusterk
 			continue
 		}
 
-		// Merge data (simple overwrite - in production, use version vectors)
+		// Copy fresh data from replica
+		// Since we cleared local data, this is a clean copy (no conflicts!)
 		kv.mu.Lock()
 		for key, value := range data {
 			kv.data[key] = value
 		}
 		kv.mu.Unlock()
 
-		log.Printf("[KV-%s] Synced partition %s from %s (%d keys)\n", 
+		log.Printf("[KV-%s] ✅ Synced partition %s from %s (%d keys)\n", 
 			kv.nodeID, partitionID, sourceNode.ID, len(data))
 		return // Successfully synced from this source
 	}
