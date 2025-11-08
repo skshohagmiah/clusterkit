@@ -39,8 +39,18 @@ func NewKVStore(ck *clusterkit.ClusterKit, nodeID, kvPort string) *KVStore {
 	// Register node rejoin hook - CRITICAL for data sync!
 	ck.OnNodeRejoin(func(node *clusterkit.Node) {
 		if node.ID == kv.nodeID {
-			// Set flag to prevent OnPartitionChange interference
+			// Use mutex to prevent multiple simultaneous rejoins
+			// This can happen if node crashes during rejoin
 			kv.rejoinMu.Lock()
+			
+			if kv.isRejoining {
+				// Already rejoining - skip this duplicate event
+				log.Printf("[KV-%s] ⚠️  Rejoin already in progress, skipping duplicate\n", kv.nodeID)
+				kv.rejoinMu.Unlock()
+				return
+			}
+			
+			// Set flag to prevent OnPartitionChange interference
 			kv.isRejoining = true
 			kv.rejoinMu.Unlock()
 			
