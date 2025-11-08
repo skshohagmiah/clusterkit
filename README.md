@@ -10,9 +10,9 @@
 [![Documentation](https://img.shields.io/badge/docs-latest-blue.svg)](./docs)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-ClusterKit is your **"GPS for distributed systems"** - it tells you **WHERE** data should go, while you decide **HOW** to store it.
+**ClusterKit handles cluster coordination so you can focus on building your application.**
 
-[Features](#-key-features) • [Quick Start](#-quick-start) • [Documentation](#-documentation) • [Examples](#-examples) • [Benchmarks](#-benchmarks)
+[Features](#-key-features) • [Quick Start](#-quick-start) • [Documentation](#-documentation) • [Examples](#-examples)
 
 </div>
 
@@ -57,7 +57,7 @@ ClusterKit provides **just the coordination layer** - nothing more, nothing less
 
 ## 🎯 What is ClusterKit?
 
-ClusterKit provides **cluster coordination** without dictating your data storage or replication strategy. Think of it as the foundation layer that handles:
+ClusterKit is a coordination library that manages the distributed aspects of your cluster while giving you complete control over data storage and replication. It handles:
 
 - ✅ **Partition Management** - Consistent hashing to determine which partition owns a key
 - ✅ **Node Discovery** - Automatic cluster membership and health monitoring
@@ -150,46 +150,6 @@ ClusterKit uses a layered architecture combining Raft consensus with consistent 
 6. **Event Notification** - Hooks fire for lifecycle events
 
 **See [docs/architecture.md](docs/architecture.md) for detailed design**
-
----
-
-## 📊 Benchmarks
-
-Performance metrics from a 10-node cluster (64 partitions, RF=3):
-
-### Throughput
-
-| Operation | Throughput | Latency (p50) | Latency (p99) |
-|-----------|------------|---------------|---------------|
-| **Write (SYNC)** | 3,750 ops/sec | 8ms | 25ms |
-| **Write (ASYNC)** | 12,500 ops/sec | 2ms | 8ms |
-| **Read (Local)** | 10,862 ops/sec | 1ms | 3ms |
-| **Read (Forward)** | 8,200 ops/sec | 3ms | 12ms |
-
-### Cluster Operations
-
-| Operation | Duration | Notes |
-|-----------|----------|-------|
-| **Node Join** | 2-3s | Includes Raft consensus + rebalancing |
-| **Rebalance (10 nodes)** | 5-8s | 64 partitions redistributed |
-| **Failure Detection** | 15s | 3 failed health checks @ 5s interval |
-| **Leader Election** | 150-300ms | Raft election timeout |
-| **Partition Lookup** | <1ms | In-memory hash calculation |
-
-### Scalability
-
-| Cluster Size | Partitions/Node | Rebalance Time | Memory Usage |
-|--------------|-----------------|----------------|--------------|
-| 3 nodes | ~21 | 2s | 15MB |
-| 10 nodes | ~6 | 8s | 25MB |
-| 50 nodes | ~1 | 45s | 80MB |
-| 100 nodes | ~0.6 | 120s | 150MB |
-
-**Test Environment:** 
-- CPU: 8 cores @ 2.4GHz
-- RAM: 16GB
-- Network: Localhost (no network latency)
-- Go: 1.21
 
 ---
 
