@@ -15,11 +15,13 @@ import (
 
 // KVStore with SYNC replication (quorum-based)
 type KVStore struct {
-	ck       *clusterkit.ClusterKit
-	data     map[string]string
-	mu       sync.RWMutex
-	nodeID   string
-	kvPort   string
+	ck          *clusterkit.ClusterKit
+	data        map[string]string
+	mu          sync.RWMutex
+	nodeID      string
+	kvPort      string
+	isRejoining bool      // Flag to prevent hook interference
+	rejoinMu    sync.Mutex // Protects isRejoining flag
 }
 
 func NewKVStore(ck *clusterkit.ClusterKit, nodeID, kvPort string) *KVStore {
@@ -37,9 +39,21 @@ func NewKVStore(ck *clusterkit.ClusterKit, nodeID, kvPort string) *KVStore {
 	// Register node rejoin hook - CRITICAL for data sync!
 	ck.OnNodeRejoin(func(node *clusterkit.Node) {
 		if node.ID == kv.nodeID {
+			// Set flag to prevent OnPartitionChange interference
+			kv.rejoinMu.Lock()
+			kv.isRejoining = true
+			kv.rejoinMu.Unlock()
+			
 			// This node is rejoining - sync all data!
-			log.Printf("[KV-%s]  REJOINING cluster - syncing all partitions...\n", kv.nodeID)
+			log.Printf("[KV-%s] 🔄 REJOINING cluster - syncing all partitions...\n", kv.nodeID)
 			kv.syncAllPartitionsOnRejoin()
+			
+			// Clear flag after sync completes
+			kv.rejoinMu.Lock()
+			kv.isRejoining = false
+			kv.rejoinMu.Unlock()
+			
+			log.Printf("[KV-%s] ✅ Rejoin sync complete\n", kv.nodeID)
 		}
 	})
 
@@ -260,6 +274,17 @@ func (kv *KVStore) syncPartitionData(partitionID string, sourceNodes []*clusterk
 func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*clusterkit.Node, copyTo *clusterkit.Node) {
 	// Only act if I'm the destination node
 	if copyTo == nil || copyTo.ID != kv.nodeID {
+		return
+	}
+
+	// Skip if we're in the middle of a rejoin sync
+	// The rejoin will handle ALL partitions, so we don't need to do individual migrations
+	kv.rejoinMu.Lock()
+	isRejoining := kv.isRejoining
+	kv.rejoinMu.Unlock()
+	
+	if isRejoining {
+		log.Printf("[KV-%s] Skipping partition %s migration (rejoin in progress)\n", kv.nodeID, partitionID)
 		return
 	}
 
