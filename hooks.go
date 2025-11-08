@@ -15,10 +15,23 @@ type PartitionChange struct {
 // PartitionChangeHook is a callback function for partition changes
 type PartitionChangeHook func(partitionID string, copyFromNodes []*Node, copyToNode *Node)
 
+// NodeJoinHook is called when a new node joins the cluster
+type NodeJoinHook func(node *Node)
+
+// NodeRejoinHook is called when an existing node rejoins after being offline
+type NodeRejoinHook func(node *Node)
+
+// NodeLeaveHook is called when a node leaves or is removed from the cluster
+type NodeLeaveHook func(nodeID string)
+
 // HookManager manages partition change hooks
 type HookManager struct {
 	hooks              []PartitionChangeHook
+	nodeJoinHooks      []NodeJoinHook
+	nodeRejoinHooks    []NodeRejoinHook
+	nodeLeaveHooks     []NodeLeaveHook
 	lastPartitionState map[string]*Partition // partitionID -> Partition
+	lastNodeSet        map[string]bool       // nodeID -> exists
 	mu                 sync.RWMutex
 	workerPool         chan struct{} // Semaphore for limiting concurrent hook executions
 }
@@ -29,7 +42,11 @@ func newHookManager() *HookManager {
 	workerPool := make(chan struct{}, 50)
 	return &HookManager{
 		hooks:              make([]PartitionChangeHook, 0),
+		nodeJoinHooks:      make([]NodeJoinHook, 0),
+		nodeRejoinHooks:    make([]NodeRejoinHook, 0),
+		nodeLeaveHooks:     make([]NodeLeaveHook, 0),
 		lastPartitionState: make(map[string]*Partition),
+		lastNodeSet:        make(map[string]bool),
 		workerPool:         workerPool,
 	}
 }
@@ -39,6 +56,27 @@ func (ck *ClusterKit) OnPartitionChange(hook PartitionChangeHook) {
 	ck.hookManager.mu.Lock()
 	defer ck.hookManager.mu.Unlock()
 	ck.hookManager.hooks = append(ck.hookManager.hooks, hook)
+}
+
+// OnNodeJoin registers a callback for when a NEW node joins
+func (ck *ClusterKit) OnNodeJoin(hook NodeJoinHook) {
+	ck.hookManager.mu.Lock()
+	defer ck.hookManager.mu.Unlock()
+	ck.hookManager.nodeJoinHooks = append(ck.hookManager.nodeJoinHooks, hook)
+}
+
+// OnNodeRejoin registers a callback for when a node REJOINS after being offline
+func (ck *ClusterKit) OnNodeRejoin(hook NodeRejoinHook) {
+	ck.hookManager.mu.Lock()
+	defer ck.hookManager.mu.Unlock()
+	ck.hookManager.nodeRejoinHooks = append(ck.hookManager.nodeRejoinHooks, hook)
+}
+
+// OnNodeLeave registers a callback for when a node leaves/is removed
+func (ck *ClusterKit) OnNodeLeave(hook NodeLeaveHook) {
+	ck.hookManager.mu.Lock()
+	defer ck.hookManager.mu.Unlock()
+	ck.hookManager.nodeLeaveHooks = append(ck.hookManager.nodeLeaveHooks, hook)
 }
 
 // checkPartitionChanges detects and notifies about partition changes
@@ -217,4 +255,61 @@ func getNodeByID(cluster *Cluster, nodeID string) *Node {
 		}
 	}
 	return nil
+}
+
+// notifyNodeJoin triggers node join hooks
+func (hm *HookManager) notifyNodeJoin(node *Node) {
+	hm.mu.RLock()
+	hooks := make([]NodeJoinHook, len(hm.nodeJoinHooks))
+	copy(hooks, hm.nodeJoinHooks)
+	hm.mu.RUnlock()
+
+	for _, hook := range hooks {
+		go func(h NodeJoinHook, n *Node) {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("NodeJoin hook panic recovered: %v\n", r)
+				}
+			}()
+			h(n)
+		}(hook, node)
+	}
+}
+
+// notifyNodeRejoin triggers node rejoin hooks
+func (hm *HookManager) notifyNodeRejoin(node *Node) {
+	hm.mu.RLock()
+	hooks := make([]NodeRejoinHook, len(hm.nodeRejoinHooks))
+	copy(hooks, hm.nodeRejoinHooks)
+	hm.mu.RUnlock()
+
+	for _, hook := range hooks {
+		go func(h NodeRejoinHook, n *Node) {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("NodeRejoin hook panic recovered: %v\n", r)
+				}
+			}()
+			h(n)
+		}(hook, node)
+	}
+}
+
+// notifyNodeLeave triggers node leave hooks
+func (hm *HookManager) notifyNodeLeave(nodeID string) {
+	hm.mu.RLock()
+	hooks := make([]NodeLeaveHook, len(hm.nodeLeaveHooks))
+	copy(hooks, hm.nodeLeaveHooks)
+	hm.mu.RUnlock()
+
+	for _, hook := range hooks {
+		go func(h NodeLeaveHook, id string) {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("NodeLeave hook panic recovered: %v\n", r)
+				}
+			}()
+			h(id)
+		}(hook, nodeID)
+	}
 }

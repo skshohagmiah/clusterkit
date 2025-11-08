@@ -199,6 +199,9 @@ func (hc *HealthChecker) removeNode(nodeID string) {
 		return
 	}
 
+	// Trigger node leave hook
+	hc.ck.hookManager.notifyNodeLeave(nodeID)
+
 	// Clear failure tracking
 	hc.mu.Lock()
 	delete(hc.nodeFailures, nodeID)

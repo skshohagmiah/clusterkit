@@ -179,6 +179,10 @@ func (ck *ClusterKit) handleJoin(w http.ResponseWriter, r *http.Request) {
 		// For rejoin, just update the node info through Raft
 		// Don't add to Raft cluster again (it's already there)
 		fmt.Printf("[REJOIN] Updating node %s info\n", node.ID)
+		
+		// Trigger rejoin hook BEFORE updating state
+		// This allows application to prepare for data sync
+		ck.hookManager.notifyNodeRejoin(&node)
 	} else {
 		// New node - add to Raft cluster
 		if err := cm.AddVoter(node.ID, joinReq.RaftAddr); err != nil {
@@ -186,6 +190,9 @@ func (ck *ClusterKit) handleJoin(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("failed to add to raft: %v", err), http.StatusInternalServerError)
 			return
 		}
+		
+		// Trigger join hook for new nodes
+		ck.hookManager.notifyNodeJoin(&node)
 	}
 
 	// Propose node addition through Raft consensus
