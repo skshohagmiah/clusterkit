@@ -19,7 +19,12 @@ type PartitionChangeHook func(partitionID string, copyFromNodes []*Node, copyToN
 type NodeJoinHook func(node *Node)
 
 // NodeRejoinHook is called when an existing node rejoins after being offline
+// This fires BEFORE rebalancing - use for preparation (e.g., clearing stale data)
 type NodeRejoinHook func(node *Node)
+
+// NodeRejoinCompleteHook is called AFTER a node rejoins AND partitions are rebalanced
+// This is when you should sync data (partitions are finalized)
+type NodeRejoinCompleteHook func(node *Node)
 
 // NodeLeaveHook is called when a node leaves or is removed from the cluster
 type NodeLeaveHook func(nodeID string)

@@ -50,20 +50,20 @@ func NewKVStore(ck *clusterkit.ClusterKit, nodeID, kvPort string) *KVStore {
 				return
 			}
 			
-			// Set flag to prevent OnPartitionChange interference
+			// Set flag - OnPartitionChange will handle the actual sync
+			// after rebalancing completes with correct partition assignments
 			kv.isRejoining = true
 			kv.rejoinMu.Unlock()
 			
-			// This node is rejoining - sync all data!
-			log.Printf("[KV-%s] 🔄 REJOINING cluster - syncing all partitions...\n", kv.nodeID)
-			kv.syncAllPartitionsOnRejoin()
+			// Clear ALL stale data immediately
+			log.Printf("[KV-%s] 🗑️  REJOINING - clearing stale data\n", kv.nodeID)
+			kv.mu.Lock()
+			kv.data = make(map[string]string)
+			kv.mu.Unlock()
 			
-			// Clear flag after sync completes
-			kv.rejoinMu.Lock()
-			kv.isRejoining = false
-			kv.rejoinMu.Unlock()
-			
-			log.Printf("[KV-%s] ✅ Rejoin sync complete\n", kv.nodeID)
+			// Note: We DON'T sync here! We let OnPartitionChange handle it
+			// after rebalancing completes with the correct partition assignments
+			log.Printf("[KV-%s] ✅ Ready for rebalance (data cleared, waiting for partition assignments)\n", kv.nodeID)
 		}
 	})
 
@@ -287,16 +287,16 @@ func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*cl
 		return
 	}
 
-	// Skip if we're in the middle of a rejoin sync
-	// The rejoin will handle ALL partitions, so we don't need to do individual migrations
+	// Check if we're rejoining
+	// If so, this is the FIRST partition assignment after rejoin
+	// We need to sync ALL assigned partitions, then clear the flag
 	kv.rejoinMu.Lock()
 	isRejoining := kv.isRejoining
-	kv.rejoinMu.Unlock()
-	
 	if isRejoining {
-		log.Printf("[KV-%s] Skipping partition %s migration (rejoin in progress)\n", kv.nodeID, partitionID)
-		return
+		// This is a rejoin - we'll sync this partition and clear flag after
+		log.Printf("[KV-%s] 📥 Rejoin: receiving partition %s assignment\n", kv.nodeID, partitionID)
 	}
+	kv.rejoinMu.Unlock()
 
 	if len(copyFromNodes) == 0 {
 		log.Printf("[KV-%s] New partition %s assigned (no data to copy)\n", kv.nodeID, partitionID)
@@ -348,6 +348,16 @@ func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*cl
 
 	log.Printf("[KV-%s] ✅ Migrated %d keys for partition %s from %d sources\n", 
 		kv.nodeID, len(mergedData), partitionID, len(copyFromNodes))
+	
+	// If this was part of a rejoin, clear the flag after first partition sync
+	// Note: OnPartitionChange fires for EACH partition, so we clear after the first one
+	// All subsequent partition changes will be handled normally
+	if isRejoining {
+		kv.rejoinMu.Lock()
+		kv.isRejoining = false
+		kv.rejoinMu.Unlock()
+		log.Printf("[KV-%s] ✅ Rejoin complete - now handling partitions normally\n", kv.nodeID)
+	}
 }
 
 func extractPort(ip string) string {
