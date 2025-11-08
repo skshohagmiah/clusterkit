@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/skshohagmiah/clusterkit"
 )
@@ -226,6 +227,12 @@ func main() {
 		PartitionCount:    64,
 		ReplicationFactor: 3,
 		Bootstrap:         joinAddr == "",
+		HealthCheck: clusterkit.HealthCheckConfig{
+			Enabled:          true,
+			Interval:         5 * time.Second,
+			Timeout:          2 * time.Second,
+			FailureThreshold: 3,
+		},
 	})
 	if err != nil {
 		log.Fatal(err)

@@ -25,6 +25,7 @@ type ClusterKit struct {
 	syncInterval     time.Duration
 	consensusManager *ConsensusManager
 	hookManager      *HookManager // Partition change hooks
+	healthChecker    *HealthChecker // Health monitoring
 	logger           Logger       // Structured logger
 	// Metrics tracking
 	startTime    time.Time
@@ -53,6 +54,9 @@ type Options struct {
 	// Cluster Formation
 	JoinAddr  string // Address of existing node to join (empty for first node)
 	Bootstrap bool   // Set to true for first node (default: auto-detect)
+	
+	// Health Checking
+	HealthCheck HealthCheckConfig // Health check configuration
 	
 	// Optional Logger
 	Logger Logger // Custom logger (default: DefaultLogger with Info level)
@@ -162,6 +166,9 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 		workerPool:         make(chan struct{}, 50),
 	}
 
+	// Initialize health checker
+	ck.healthChecker = NewHealthChecker(ck, opts.HealthCheck)
+
 	// Load existing state if available
 	if err := ck.loadState(); err != nil {
 		fmt.Printf("No existing state found, starting fresh: %v\n", err)
@@ -181,6 +188,9 @@ func (ck *ClusterKit) Start() error {
 	if err := ck.consensusManager.Start(); err != nil {
 		return fmt.Errorf("failed to start consensus: %v", err)
 	}
+
+	// Start health checker
+	ck.healthChecker.Start()
 
 	// Discover and join known nodes
 	if len(ck.knownNodes) > 0 {
@@ -289,6 +299,9 @@ func (ck *ClusterKit) Stop() error {
 			fmt.Printf("Failed to shutdown HTTP server gracefully: %v\n", err)
 		}
 	}
+
+	// Stop health checker
+	ck.healthChecker.Stop()
 
 	// Stop consensus manager
 	ck.consensusManager.Stop()

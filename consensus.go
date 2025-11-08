@@ -140,20 +140,37 @@ func (f *clusterFSM) applyAddNode(data interface{}) error {
 
 // applyRemoveNode removes a node from the cluster
 func (f *clusterFSM) applyRemoveNode(data interface{}) error {
-	nodeID, ok := data.(string)
-	if !ok || nodeID == "" {
-		return fmt.Errorf("invalid or empty node ID")
+	// Handle both string and map formats
+	var nodeID string
+	
+	switch v := data.(type) {
+	case string:
+		nodeID = v
+	case map[string]interface{}:
+		id, ok := v["id"].(string)
+		if !ok || id == "" {
+			return fmt.Errorf("invalid or missing node ID in map")
+		}
+		nodeID = id
+	default:
+		return fmt.Errorf("invalid data type for remove_node")
+	}
+
+	if nodeID == "" {
+		return fmt.Errorf("empty node ID")
 	}
 
 	// Lock cluster state for thread-safe modification
 	f.ck.mu.Lock()
 	defer f.ck.mu.Unlock()
 
+	fmt.Printf("[DEBUG] applyRemoveNode called for %s (current nodes: %d)\n", nodeID, len(f.ck.cluster.Nodes))
+
 	for i, node := range f.ck.cluster.Nodes {
 		if node.ID == nodeID {
 			f.ck.cluster.Nodes = append(f.ck.cluster.Nodes[:i], f.ck.cluster.Nodes[i+1:]...)
 			f.ck.cluster.rebuildNodeMap() // Rebuild map for O(1) lookups
-			fmt.Printf("✓ Removed node: %s\n", nodeID)
+			fmt.Printf("✓ Removed node: %s (total nodes: %d)\n", nodeID, len(f.ck.cluster.Nodes))
 			return nil
 		}
 	}

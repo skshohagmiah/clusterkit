@@ -162,11 +162,30 @@ func (ck *ClusterKit) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add node to Raft cluster
-	if err := cm.AddVoter(node.ID, joinReq.RaftAddr); err != nil {
-		fmt.Printf("Failed to add voter to Raft: %v\n", err)
-		http.Error(w, fmt.Sprintf("failed to add to raft: %v", err), http.StatusInternalServerError)
-		return
+	// Check if this is a rejoin (node already exists)
+	ck.mu.RLock()
+	isRejoin := false
+	for _, existing := range ck.cluster.Nodes {
+		if existing.ID == node.ID {
+			isRejoin = true
+			fmt.Printf("[REJOIN] Node %s is rejoining (was: %s, now: %s)\n", 
+				node.ID, existing.IP, node.IP)
+			break
+		}
+	}
+	ck.mu.RUnlock()
+
+	if isRejoin {
+		// For rejoin, just update the node info through Raft
+		// Don't add to Raft cluster again (it's already there)
+		fmt.Printf("[REJOIN] Updating node %s info\n", node.ID)
+	} else {
+		// New node - add to Raft cluster
+		if err := cm.AddVoter(node.ID, joinReq.RaftAddr); err != nil {
+			fmt.Printf("Failed to add voter to Raft: %v\n", err)
+			http.Error(w, fmt.Sprintf("failed to add to raft: %v", err), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Propose node addition through Raft consensus
