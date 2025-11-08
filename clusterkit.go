@@ -25,6 +25,7 @@ type ClusterKit struct {
 	syncInterval     time.Duration
 	consensusManager *ConsensusManager
 	hookManager      *HookManager // Partition change hooks
+	healthChecker    *HealthChecker // Health monitoring
 	logger           Logger       // Structured logger
 	// Metrics tracking
 	startTime    time.Time
@@ -53,6 +54,9 @@ type Options struct {
 	// Cluster Formation
 	JoinAddr  string // Address of existing node to join (empty for first node)
 	Bootstrap bool   // Set to true for first node (default: auto-detect)
+	
+	// Health Checking
+	HealthCheck HealthCheckConfig // Health check configuration
 	
 	// Optional Logger
 	Logger Logger // Custom logger (default: DefaultLogger with Info level)
@@ -162,6 +166,9 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 		workerPool:         make(chan struct{}, 50),
 	}
 
+	// Initialize health checker
+	ck.healthChecker = NewHealthChecker(ck, opts.HealthCheck)
+
 	// Load existing state if available
 	if err := ck.loadState(); err != nil {
 		fmt.Printf("No existing state found, starting fresh: %v\n", err)
@@ -181,6 +188,9 @@ func (ck *ClusterKit) Start() error {
 	if err := ck.consensusManager.Start(); err != nil {
 		return fmt.Errorf("failed to start consensus: %v", err)
 	}
+
+	// Start health checker
+	ck.healthChecker.Start()
 
 	// Discover and join known nodes
 	if len(ck.knownNodes) > 0 {
@@ -289,6 +299,9 @@ func (ck *ClusterKit) Stop() error {
 			fmt.Printf("Failed to shutdown HTTP server gracefully: %v\n", err)
 		}
 	}
+
+	// Stop health checker
+	ck.healthChecker.Stop()
 
 	// Stop consensus manager
 	ck.consensusManager.Stop()
@@ -481,17 +494,19 @@ func generateNodeName(nodeID string) string {
 }
 
 // calculateRaftAddr auto-calculates Raft address from HTTP address
-// Examples: ":8080" -> "127.0.0.1:9001", ":8081" -> "127.0.0.1:9002"
+// Examples: ":8080" -> "127.0.0.1:10001", ":8081" -> "127.0.0.1:10002"
+// Uses port range 10001+ to avoid conflicts with common application ports (9000-9999)
 func calculateRaftAddr(httpAddr string) string {
 	var port int
 	
 	// Try to extract port from HTTP address
 	if _, err := fmt.Sscanf(httpAddr, ":%d", &port); err == nil {
-		// Calculate Raft port: 9001 + (httpPort - 8080)
-		raftPort := 9001 + (port - 8080)
+		// Calculate Raft port: 10001 + (httpPort - 8080)
+		// This ensures Raft ports are in the 10000+ range, avoiding conflicts
+		raftPort := 10001 + (port - 8080)
 		return fmt.Sprintf("127.0.0.1:%d", raftPort)
 	}
 	
-	// Default to 9001
-	return "127.0.0.1:9001"
+	// Default to 10001
+	return "127.0.0.1:10001"
 }

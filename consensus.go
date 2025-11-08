@@ -19,7 +19,6 @@ type ConsensusManager struct {
 	ck          *ClusterKit
 	raft        *raft.Raft
 	fsm         *clusterFSM
-	mu          sync.RWMutex
 	raftDir     string
 	raftBind    string
 	isBootstrap bool
@@ -110,9 +109,9 @@ func (f *clusterFSM) applyAddNode(data interface{}) error {
 
 	// Lock cluster state for thread-safe modification
 	f.ck.mu.Lock()
-	
+
 	fmt.Printf("[DEBUG] applyAddNode called for %s (current nodes: %d)\n", node.ID, len(f.ck.cluster.Nodes))
-	
+
 	// Check if node already exists
 	for i, existing := range f.ck.cluster.Nodes {
 		if existing.ID == node.ID {
@@ -129,32 +128,49 @@ func (f *clusterFSM) applyAddNode(data interface{}) error {
 	f.ck.cluster.Nodes = append(f.ck.cluster.Nodes, node)
 	f.ck.cluster.rebuildNodeMap() // Rebuild map for O(1) lookups
 	f.ck.mu.Unlock()
-	
+
 	fmt.Printf("✓ Added node: %s (total nodes: %d)\n", node.ID, len(f.ck.cluster.Nodes))
-	
+
 	// DO NOT trigger rebalancing here - it causes race conditions
 	// Rebalancing should be triggered explicitly by the leader after consensus
 	// or automatically after a stabilization period
-	
+
 	return nil
 }
 
 // applyRemoveNode removes a node from the cluster
 func (f *clusterFSM) applyRemoveNode(data interface{}) error {
-	nodeID, ok := data.(string)
-	if !ok || nodeID == "" {
-		return fmt.Errorf("invalid or empty node ID")
+	// Handle both string and map formats
+	var nodeID string
+	
+	switch v := data.(type) {
+	case string:
+		nodeID = v
+	case map[string]interface{}:
+		id, ok := v["id"].(string)
+		if !ok || id == "" {
+			return fmt.Errorf("invalid or missing node ID in map")
+		}
+		nodeID = id
+	default:
+		return fmt.Errorf("invalid data type for remove_node")
+	}
+
+	if nodeID == "" {
+		return fmt.Errorf("empty node ID")
 	}
 
 	// Lock cluster state for thread-safe modification
 	f.ck.mu.Lock()
 	defer f.ck.mu.Unlock()
-	
+
+	fmt.Printf("[DEBUG] applyRemoveNode called for %s (current nodes: %d)\n", nodeID, len(f.ck.cluster.Nodes))
+
 	for i, node := range f.ck.cluster.Nodes {
 		if node.ID == nodeID {
 			f.ck.cluster.Nodes = append(f.ck.cluster.Nodes[:i], f.ck.cluster.Nodes[i+1:]...)
 			f.ck.cluster.rebuildNodeMap() // Rebuild map for O(1) lookups
-			fmt.Printf("✓ Removed node: %s\n", nodeID)
+			fmt.Printf("✓ Removed node: %s (total nodes: %d)\n", nodeID, len(f.ck.cluster.Nodes))
 			return nil
 		}
 	}
@@ -172,7 +188,7 @@ func (f *clusterFSM) applyCreatePartitions(data interface{}) error {
 	// Lock cluster state for thread-safe modification
 	f.ck.mu.Lock()
 	defer f.ck.mu.Unlock()
-	
+
 	if f.ck.cluster.PartitionMap == nil {
 		f.ck.cluster.PartitionMap = &PartitionMap{
 			Partitions: make(map[string]*Partition),
@@ -190,18 +206,18 @@ func (f *clusterFSM) applyCreatePartitions(data interface{}) error {
 		if !ok {
 			return fmt.Errorf("invalid partition data for %s", partID)
 		}
-		
+
 		primaryNode, ok := partMap["primary_node"].(string)
 		if !ok || primaryNode == "" {
 			return fmt.Errorf("invalid primary_node for partition %s", partID)
 		}
-		
+
 		// Validate that primary node exists in NodeMap
 		if _, exists := f.ck.cluster.NodeMap[primaryNode]; !exists {
 			fmt.Printf("Warning: primary node %s for partition %s not in NodeMap yet, skipping\n", primaryNode, partID)
 			continue
 		}
-		
+
 		partition := &Partition{
 			ID:          partID,
 			PrimaryNode: primaryNode,
@@ -228,10 +244,10 @@ func (f *clusterFSM) applyCreatePartitions(data interface{}) error {
 	}
 
 	fmt.Printf("✓ Created %d partitions\n", len(f.ck.cluster.PartitionMap.Partitions))
-	
+
 	// Notify hooks about partition changes
 	f.ck.hookManager.checkPartitionChanges(f.ck.cluster.PartitionMap.Partitions, f.ck.cluster)
-	
+
 	return nil
 }
 
@@ -245,7 +261,7 @@ func (f *clusterFSM) applyRebalancePartitions(data interface{}) error {
 	// Lock cluster state for thread-safe modification
 	f.ck.mu.Lock()
 	defer f.ck.mu.Unlock()
-	
+
 	if f.ck.cluster.PartitionMap == nil {
 		return fmt.Errorf("no partition map exists")
 	}
@@ -266,7 +282,7 @@ func (f *clusterFSM) applyRebalancePartitions(data interface{}) error {
 			skippedPartitions++
 			continue
 		}
-		
+
 		partition, exists := f.ck.cluster.PartitionMap.Partitions[partID]
 		if !exists {
 			fmt.Printf("Warning: partition %s not found during rebalance\n", partID)
@@ -328,10 +344,10 @@ func (f *clusterFSM) applyRebalancePartitions(data interface{}) error {
 	} else {
 		fmt.Printf("✓ Rebalanced %d partitions\n", updatedPartitions)
 	}
-	
+
 	// Notify hooks about partition changes
 	f.ck.hookManager.checkPartitionChanges(f.ck.cluster.PartitionMap.Partitions, f.ck.cluster)
-	
+
 	return nil
 }
 
@@ -346,7 +362,7 @@ func (f *clusterFSM) applyUpdatePartition(data interface{}) error {
 	if !ok || partID == "" {
 		return fmt.Errorf("invalid or missing partition ID")
 	}
-	
+
 	if f.ck.cluster.PartitionMap == nil {
 		return fmt.Errorf("no partition map exists")
 	}
@@ -383,7 +399,7 @@ func (f *clusterFSM) Snapshot() (raft.FSMSnapshot, error) {
 	clusterCopy := *f.ck.cluster
 	clusterCopy.Nodes = make([]Node, len(f.ck.cluster.Nodes))
 	copy(clusterCopy.Nodes, f.ck.cluster.Nodes)
-	
+
 	// Deep copy partition map
 	if f.ck.cluster.PartitionMap != nil {
 		clusterCopy.PartitionMap = &PartitionMap{
@@ -469,12 +485,12 @@ func (s *clusterSnapshot) Release() {}
 func NewConsensusManager(ck *ClusterKit, bootstrap bool, raftAddr string) *ConsensusManager {
 	// Raft directory for logs and snapshots
 	raftDir := filepath.Join(ck.stateFile, "..", "raft")
-	
+
 	// Use provided Raft address or default
 	if raftAddr == "" {
 		raftAddr = "127.0.0.1:9001"
 	}
-	
+
 	return &ConsensusManager{
 		ck:          ck,
 		raftDir:     raftDir,
@@ -542,7 +558,7 @@ func (cm *ConsensusManager) Start() error {
 		if err := future.Error(); err != nil {
 			return fmt.Errorf("failed to get raft configuration: %v", err)
 		}
-		
+
 		// Only bootstrap if no servers exist
 		if len(future.Configuration().Servers) == 0 {
 			configuration := raft.Configuration{
@@ -570,32 +586,32 @@ func (cm *ConsensusManager) Start() error {
 // Stop stops the consensus manager
 func (cm *ConsensusManager) Stop() error {
 	var errs []error
-	
+
 	// Shutdown Raft
 	if cm.raft != nil {
 		if err := cm.raft.Shutdown().Error(); err != nil {
 			errs = append(errs, fmt.Errorf("raft shutdown: %v", err))
 		}
 	}
-	
+
 	// Close transport
 	if cm.transport != nil {
 		if err := cm.transport.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("transport close: %v", err))
 		}
 	}
-	
+
 	// Close BoltDB store
 	if cm.logStore != nil {
 		if err := cm.logStore.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("logstore close: %v", err))
 		}
 	}
-	
+
 	if len(errs) > 0 {
 		return fmt.Errorf("consensus shutdown errors: %v", errs)
 	}
-	
+
 	fmt.Println("✓ Consensus manager stopped cleanly")
 	return nil
 }
@@ -649,7 +665,7 @@ func (cm *ConsensusManager) GetCurrentTerm() uint64 {
 // WaitForLeader waits until a leader is elected or timeout
 func (cm *ConsensusManager) WaitForLeader(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	
+
 	for time.Now().Before(deadline) {
 		_, leaderID := cm.raft.LeaderWithID()
 		if leaderID != "" {
@@ -710,14 +726,14 @@ func (cm *ConsensusManager) RemoveServer(nodeID string) error {
 
 // ConsensusStats returns consensus statistics
 type ConsensusStats struct {
-	State         string `json:"state"`
-	Term          uint64 `json:"term"`
-	LastLogIndex  uint64 `json:"last_log_index"`
-	LastLogTerm   uint64 `json:"last_log_term"`
-	CommitIndex   uint64 `json:"commit_index"`
-	AppliedIndex  uint64 `json:"applied_index"`
-	NumPeers      int    `json:"num_peers"`
-	Leader        string `json:"leader"`
+	State        string `json:"state"`
+	Term         uint64 `json:"term"`
+	LastLogIndex uint64 `json:"last_log_index"`
+	LastLogTerm  uint64 `json:"last_log_term"`
+	CommitIndex  uint64 `json:"commit_index"`
+	AppliedIndex uint64 `json:"applied_index"`
+	NumPeers     int    `json:"num_peers"`
+	Leader       string `json:"leader"`
 }
 
 // GetStats returns consensus statistics from Raft
@@ -730,14 +746,14 @@ func (cm *ConsensusManager) GetStats() *ConsensusStats {
 	_, leaderID := cm.raft.LeaderWithID()
 
 	return &ConsensusStats{
-		State:         cm.raft.State().String(),
-		Term:          parseUint64(stats["term"]),
-		LastLogIndex:  parseUint64(stats["last_log_index"]),
-		LastLogTerm:   parseUint64(stats["last_log_term"]),
-		CommitIndex:   parseUint64(stats["commit_index"]),
-		AppliedIndex:  parseUint64(stats["applied_index"]),
-		NumPeers:      parseInt(stats["num_peers"]),
-		Leader:        string(leaderID),
+		State:        cm.raft.State().String(),
+		Term:         parseUint64(stats["term"]),
+		LastLogIndex: parseUint64(stats["last_log_index"]),
+		LastLogTerm:  parseUint64(stats["last_log_term"]),
+		CommitIndex:  parseUint64(stats["commit_index"]),
+		AppliedIndex: parseUint64(stats["applied_index"]),
+		NumPeers:     parseInt(stats["num_peers"]),
+		Leader:       string(leaderID),
 	}
 }
 
