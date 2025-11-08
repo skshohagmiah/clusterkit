@@ -162,11 +162,55 @@ func (ck *ClusterKit) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add node to Raft cluster
-	if err := cm.AddVoter(node.ID, joinReq.RaftAddr); err != nil {
-		fmt.Printf("Failed to add voter to Raft: %v\n", err)
-		http.Error(w, fmt.Sprintf("failed to add to raft: %v", err), http.StatusInternalServerError)
-		return
+	// Check if this is a rejoin (node already exists)
+	ck.mu.RLock()
+	isRejoin := false
+	var partitionsBeforeLeave []string
+	for _, existing := range ck.cluster.Nodes {
+		if existing.ID == node.ID {
+			isRejoin = true
+			fmt.Printf("[REJOIN] Node %s is rejoining (was: %s, now: %s)\n", 
+				node.ID, existing.IP, node.IP)
+			
+			// Collect partitions this node owned before leaving
+			if ck.cluster.PartitionMap != nil {
+				for _, partition := range ck.cluster.PartitionMap.Partitions {
+					if partition.PrimaryNode == node.ID {
+						partitionsBeforeLeave = append(partitionsBeforeLeave, partition.ID)
+					}
+					for _, replicaID := range partition.ReplicaNodes {
+						if replicaID == node.ID {
+							partitionsBeforeLeave = append(partitionsBeforeLeave, partition.ID)
+							break
+						}
+					}
+				}
+			}
+			break
+		}
+	}
+	clusterSize := len(ck.cluster.Nodes)
+	ck.mu.RUnlock()
+
+	if isRejoin {
+		// For rejoin, just update the node info through Raft
+		// Don't add to Raft cluster again (it's already there)
+		fmt.Printf("[REJOIN] Updating node %s info\n", node.ID)
+		
+		// Trigger rejoin hook BEFORE updating state
+		// This allows application to prepare for data sync
+		ck.hookManager.notifyNodeRejoin(&node, partitionsBeforeLeave)
+	} else {
+		// New node - add to Raft cluster
+		if err := cm.AddVoter(node.ID, joinReq.RaftAddr); err != nil {
+			fmt.Printf("Failed to add voter to Raft: %v\n", err)
+			http.Error(w, fmt.Sprintf("failed to add to raft: %v", err), http.StatusInternalServerError)
+			return
+		}
+		
+		// Trigger join hook for new nodes
+		isBootstrap := clusterSize == 0
+		ck.hookManager.notifyNodeJoin(&node, clusterSize+1, isBootstrap)
 	}
 
 	// Propose node addition through Raft consensus

@@ -8,30 +8,70 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/skshohagmiah/clusterkit"
 )
 
 // KVStore with SYNC replication (quorum-based)
 type KVStore struct {
-	ck       *clusterkit.ClusterKit
-	data     map[string]string
-	mu       sync.RWMutex
-	nodeID   string
-	kvPort   string
+	ck          *clusterkit.ClusterKit
+	data        map[string]string
+	mu          sync.RWMutex
+	nodeID      string
+	kvPort      string
+	isRejoining bool       // Flag to prevent hook interference
+	rejoinMu    sync.Mutex // Protects isRejoining flag
 }
 
 func NewKVStore(ck *clusterkit.ClusterKit, nodeID, kvPort string) *KVStore {
 	kv := &KVStore{
-		ck:     ck,
 		data:   make(map[string]string),
 		nodeID: nodeID,
 		kvPort: kvPort,
 	}
 
-	// Register partition change hook for data migration
-	ck.OnPartitionChange(func(partitionID string, copyFromNodes []*clusterkit.Node, copyTo *clusterkit.Node) {
-		kv.handlePartitionChange(partitionID, copyFromNodes, copyTo)
+	// Register partition change hook
+	ck.OnPartitionChange(func(event *clusterkit.PartitionChangeEvent) {
+		kv.handlePartitionChange(event)
+	})
+
+	// Register node rejoin hook - CRITICAL for data sync!
+	ck.OnNodeRejoin(func(event *clusterkit.NodeRejoinEvent) {
+		if event.Node.ID == kv.nodeID {
+			// Use mutex to prevent multiple simultaneous rejoins
+			// This can happen if node crashes during rejoin
+			kv.rejoinMu.Lock()
+
+			if kv.isRejoining {
+				// Already rejoining - skip this duplicate event
+				log.Printf("[KV-%s] ⚠️  Rejoin already in progress, skipping duplicate\n", kv.nodeID)
+				kv.rejoinMu.Unlock()
+				return
+			}
+
+			// Set flag - OnPartitionChange will handle the actual sync
+			// after rebalancing completes with correct partition assignments
+			kv.isRejoining = true
+			kv.rejoinMu.Unlock()
+
+			// Clear ALL stale data immediately
+			log.Printf("[KV-%s] 🗑️  REJOINING - clearing stale data (offline: %v)\n",
+				kv.nodeID, event.OfflineDuration)
+			kv.mu.Lock()
+			kv.data = make(map[string]string)
+			kv.mu.Unlock()
+
+			// Note: We DON'T sync here! We let OnPartitionChange handle it
+			// after rebalancing completes with the correct partition assignments
+			log.Printf("[KV-%s] ✅ Ready for rebalance (data cleared, waiting for partition assignments)\n", kv.nodeID)
+		}
+	})
+
+	// Register node leave hook
+	ck.OnNodeLeave(func(event *clusterkit.NodeLeaveEvent) {
+		log.Printf("[KV-%s] Node %s left the cluster (reason: %s, partitions: %d)\n",
+			kv.nodeID, event.Node.ID, event.Reason, len(event.PartitionsOwned)+len(event.PartitionsReplica))
 	})
 
 	return kv
@@ -88,7 +128,7 @@ func (kv *KVStore) handleGet(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"key": key, "value": value})
 		return
 	}
-	
+
 	http.Error(w, "key not found", http.StatusNotFound)
 }
 
@@ -139,25 +179,141 @@ func (kv *KVStore) handleMigrate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePartitionChange is called when a partition is reassigned
-func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*clusterkit.Node, copyTo *clusterkit.Node) {
+// syncAllPartitionsOnRejoin syncs all partitions when this node rejoins
+func (kv *KVStore) syncAllPartitionsOnRejoin() {
+	log.Printf("[KV-%s] 🗑️  Clearing all local data (stale after offline period)\n", kv.nodeID)
+
+	// STRATEGY 1: Clear all existing data (RECOMMENDED for production)
+	// This ensures no stale data remains
+	kv.mu.Lock()
+	kv.data = make(map[string]string) // Clear everything!
+	kv.mu.Unlock()
+
+	// STRATEGY 2 (Alternative): Keep local data and merge
+	// Use this if you want to preserve local writes during offline period
+	// But you'll need conflict resolution (version vectors, last-write-wins, etc.)
+
+	// Get all partitions this node should have
+	cluster := kv.ck.GetCluster()
+	if cluster.PartitionMap == nil {
+		log.Printf("[KV-%s] No partitions to sync\n", kv.nodeID)
+		return
+	}
+
+	synced := 0
+	for _, partition := range cluster.PartitionMap.Partitions {
+		// Check if this node is primary or replica for this partition
+		isPrimary := partition.PrimaryNode == kv.nodeID
+		isReplica := false
+		for _, replicaID := range partition.ReplicaNodes {
+			if replicaID == kv.nodeID {
+				isReplica = true
+				break
+			}
+		}
+
+		if isPrimary || isReplica {
+			// Sync this partition from other replicas
+			copyFromNodes := []*clusterkit.Node{}
+
+			// Add primary if not self
+			if partition.PrimaryNode != kv.nodeID {
+				for _, node := range cluster.Nodes {
+					if node.ID == partition.PrimaryNode {
+						copyFromNodes = append(copyFromNodes, &node)
+						break
+					}
+				}
+			}
+
+			// Add replicas if not self
+			for _, replicaID := range partition.ReplicaNodes {
+				if replicaID != kv.nodeID {
+					for _, node := range cluster.Nodes {
+						if node.ID == replicaID {
+							copyFromNodes = append(copyFromNodes, &node)
+							break
+						}
+					}
+				}
+			}
+
+			if len(copyFromNodes) > 0 {
+				// Sync data for this partition
+				kv.syncPartitionData(partition.ID, copyFromNodes)
+				synced++
+			}
+		}
+	}
+
+	log.Printf("[KV-%s] ✅ Synced %d partitions on rejoin\n", kv.nodeID, synced)
+}
+
+// syncPartitionData fetches and merges data for a specific partition
+func (kv *KVStore) syncPartitionData(partitionID string, sourceNodes []*clusterkit.Node) {
+	for _, sourceNode := range sourceNodes {
+		// Build migration URL
+		kvPort := extractPort(sourceNode.IP)
+		kvPort = fmt.Sprintf("9%s", kvPort[1:]) // Convert 8080 -> 9080
+		url := fmt.Sprintf("http://localhost:%s/kv/migrate?partition=%s", kvPort, partitionID)
+
+		// Fetch data
+		resp, err := http.Get(url)
+		if err != nil {
+			continue // Try next source
+		}
+		defer resp.Body.Close()
+
+		var data map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			continue
+		}
+
+		// Copy fresh data from replica
+		// Since we cleared local data, this is a clean copy (no conflicts!)
+		kv.mu.Lock()
+		for key, value := range data {
+			kv.data[key] = value
+		}
+		kv.mu.Unlock()
+
+		log.Printf("[KV-%s] ✅ Synced partition %s from %s (%d keys)\n",
+			kv.nodeID, partitionID, sourceNode.ID, len(data))
+		return // Successfully synced from this source
+	}
+}
+
+func (kv *KVStore) handlePartitionChange(event *clusterkit.PartitionChangeEvent) {
 	// Only act if I'm the destination node
-	if copyTo == nil || copyTo.ID != kv.nodeID {
+	if event.CopyToNode == nil || event.CopyToNode.ID != kv.nodeID {
 		return
 	}
 
-	if len(copyFromNodes) == 0 {
-		log.Printf("[KV-%s] New partition %s assigned (no data to copy)\n", kv.nodeID, partitionID)
+	// Check if we're rejoining
+	// If so, this is the FIRST partition assignment after rejoin
+	// We need to sync ALL assigned partitions, then clear the flag
+	kv.rejoinMu.Lock()
+	isRejoining := kv.isRejoining
+	if isRejoining {
+		// This is a rejoin - we'll sync this partition and clear flag after
+		log.Printf("[KV-%s] 📥 Rejoin: receiving partition %s assignment (reason: %s)\n",
+			kv.nodeID, event.PartitionID, event.ChangeReason)
+	}
+	kv.rejoinMu.Unlock()
+
+	if len(event.CopyFromNodes) == 0 {
+		log.Printf("[KV-%s] New partition %s assigned (no data to copy)\n", kv.nodeID, event.PartitionID)
 		return
 	}
 
-	log.Printf("[KV-%s] 🔄 Migrating partition %s from %d nodes\n", kv.nodeID, partitionID, len(copyFromNodes))
+	log.Printf("[KV-%s] 🔄 Migrating partition %s from %d nodes\n", kv.nodeID, event.PartitionID, len(event.CopyFromNodes))
 
 	// Merge data from ALL source nodes
 	mergedData := make(map[string]string)
-	
-	for _, sourceNode := range copyFromNodes {
+
+	for _, sourceNode := range event.CopyFromNodes {
 		// Fetch data from this source node
-		url := fmt.Sprintf("http://localhost:%s/kv/migrate?partition=%s", extractPort(sourceNode.IP), partitionID)
+		url := fmt.Sprintf("http://localhost:%s/kv/migrate?partition=%s", extractPort(sourceNode.IP), event.PartitionID)
 		resp, err := http.Get(url)
 		if err != nil {
 			log.Printf("[KV-%s] ⚠️  Failed to fetch from %s: %v\n", kv.nodeID, sourceNode.ID, err)
@@ -182,7 +338,7 @@ func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*cl
 		for key, value := range migrationData.Keys {
 			mergedData[key] = value
 		}
-		
+
 		log.Printf("[KV-%s] 📦 Fetched %d keys from %s\n", kv.nodeID, migrationData.Count, sourceNode.ID)
 	}
 
@@ -193,8 +349,18 @@ func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*cl
 	}
 	kv.mu.Unlock()
 
-	log.Printf("[KV-%s] ✅ Migrated %d keys for partition %s from %d sources\n", 
-		kv.nodeID, len(mergedData), partitionID, len(copyFromNodes))
+	log.Printf("[KV-%s] ✅ Migrated %d keys for partition %s from %d sources\n",
+		kv.nodeID, len(mergedData), event.PartitionID, len(event.CopyFromNodes))
+
+	// If this was part of a rejoin, clear the flag after first partition sync
+	// Note: OnPartitionChange fires for EACH partition, so we clear after the first one
+	// All subsequent partition changes will be handled normally
+	if isRejoining {
+		kv.rejoinMu.Lock()
+		kv.isRejoining = false
+		kv.rejoinMu.Unlock()
+		log.Printf("[KV-%s] ✅ Rejoin complete - now handling partitions normally\n", kv.nodeID)
+	}
 }
 
 func extractPort(ip string) string {
@@ -206,9 +372,15 @@ func main() {
 	httpPort := os.Getenv("HTTP_PORT")
 	kvPort := os.Getenv("KV_PORT")
 	joinAddr := os.Getenv("JOIN_ADDR")
+	dataDir := os.Getenv("DATA_DIR")
 
 	if nodeID == "" || httpPort == "" || kvPort == "" {
 		log.Fatal("NODE_ID, HTTP_PORT, and KV_PORT required")
+	}
+
+	// Default data directory if not provided
+	if dataDir == "" {
+		dataDir = "./clusterkit-data"
 	}
 
 	// Initialize ClusterKit
@@ -216,9 +388,16 @@ func main() {
 		NodeID:            nodeID,
 		HTTPAddr:          ":" + httpPort,
 		JoinAddr:          joinAddr,
+		DataDir:           dataDir,
 		PartitionCount:    64,
 		ReplicationFactor: 3,
 		Bootstrap:         joinAddr == "",
+		HealthCheck: clusterkit.HealthCheckConfig{
+			Enabled:          true,
+			Interval:         5 * time.Second,
+			Timeout:          2 * time.Second,
+			FailureThreshold: 3,
+		},
 	})
 	if err != nil {
 		log.Fatal(err)

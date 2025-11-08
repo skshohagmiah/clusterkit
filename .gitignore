@@ -23,7 +23,10 @@ go.work
 data/
 clusterkit-data/
 *.json
+
+# Logs (but keep example logs visible)
 *.log
+!example/*/logs/.gitkeep
 
 # IDE
 .vscode/

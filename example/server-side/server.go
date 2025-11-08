@@ -25,15 +25,14 @@ type KVStore struct {
 
 func NewKVStore(ck *clusterkit.ClusterKit, nodeID, kvPort string) *KVStore {
 	kv := &KVStore{
-		ck:     ck,
 		data:   make(map[string]string),
 		nodeID: nodeID,
 		kvPort: kvPort,
 	}
 
-	// Register partition change hook for data migration
-	ck.OnPartitionChange(func(partitionID string, copyFromNodes []*clusterkit.Node, copyTo *clusterkit.Node) {
-		kv.handlePartitionChange(partitionID, copyFromNodes, copyTo)
+	// Register partition change hook
+	ck.OnPartitionChange(func(event *clusterkit.PartitionChangeEvent) {
+		kv.handlePartitionChange(event.PartitionID, event.CopyFromNodes, event.CopyToNode)
 	})
 
 	return kv

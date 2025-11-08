@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/skshohagmiah/clusterkit"
 )
@@ -30,8 +31,8 @@ func NewKVStore(ck *clusterkit.ClusterKit, nodeID, kvPort string) *KVStore {
 	}
 
 	// Register partition change hook for data migration
-	ck.OnPartitionChange(func(partitionID string, copyFromNodes []*clusterkit.Node, copyTo *clusterkit.Node) {
-		kv.handlePartitionChange(partitionID, copyFromNodes, copyTo)
+	ck.OnPartitionChange(func(event *clusterkit.PartitionChangeEvent) {
+		kv.handlePartitionChange(event.PartitionID, event.CopyFromNodes, event.CopyToNode)
 	})
 
 	return kv
@@ -206,9 +207,15 @@ func main() {
 	httpPort := os.Getenv("HTTP_PORT")
 	kvPort := os.Getenv("KV_PORT")
 	joinAddr := os.Getenv("JOIN_ADDR")
+	dataDir := os.Getenv("DATA_DIR")
 
 	if nodeID == "" || httpPort == "" || kvPort == "" {
 		log.Fatal("NODE_ID, HTTP_PORT, and KV_PORT required")
+	}
+
+	// Default data directory if not provided
+	if dataDir == "" {
+		dataDir = "./clusterkit-data"
 	}
 
 	// Initialize ClusterKit
@@ -216,9 +223,16 @@ func main() {
 		NodeID:            nodeID,
 		HTTPAddr:          ":" + httpPort,
 		JoinAddr:          joinAddr,
+		DataDir:           dataDir,
 		PartitionCount:    64,
 		ReplicationFactor: 3,
 		Bootstrap:         joinAddr == "",
+		HealthCheck: clusterkit.HealthCheckConfig{
+			Enabled:          true,
+			Interval:         5 * time.Second,
+			Timeout:          2 * time.Second,
+			FailureThreshold: 3,
+		},
 	})
 	if err != nil {
 		log.Fatal(err)
