@@ -3,42 +3,110 @@ package clusterkit
 import (
 	"fmt"
 	"sync"
+	"time"
 )
 
-// PartitionChange represents a change in partition assignment
-type PartitionChange struct {
-	PartitionID   string  // The partition that changed (e.g., "partition-5")
-	CopyFromNodes []*Node // Nodes to copy data from (all nodes that have the data)
-	CopyToNode    *Node   // Node that needs the data (YOU)
+// ============================================
+// Event Structures
+// ============================================
+
+// PartitionChangeEvent represents a partition assignment change
+type PartitionChangeEvent struct {
+	PartitionID   string    // The partition that changed (e.g., "partition-5")
+	CopyFromNodes []*Node   // Nodes to copy data from (all nodes that have the data)
+	CopyToNode    *Node     // Node that needs the data (YOU)
+	ChangeReason  string    // "node_join", "node_leave", "rebalance", "manual"
+	OldPrimary    string    // Previous primary node ID
+	NewPrimary    string    // New primary node ID
+	Timestamp     time.Time // When the change occurred
 }
 
-// PartitionChangeHook is a callback function for partition changes
-type PartitionChangeHook func(partitionID string, copyFromNodes []*Node, copyToNode *Node)
+// NodeJoinEvent represents a node joining the cluster
+type NodeJoinEvent struct {
+	Node          *Node     // The joining node
+	ClusterSize   int       // Total nodes after join
+	IsBootstrap   bool      // Is this the first node?
+	Timestamp     time.Time // When the node joined
+}
+
+// NodeRejoinEvent represents a node rejoining after being offline
+type NodeRejoinEvent struct {
+	Node                  *Node         // The rejoining node
+	OfflineDuration       time.Duration // How long it was offline
+	LastSeenAt            time.Time     // When it was last seen
+	PartitionsBeforeLeave []string      // Partitions it had before leaving
+	Timestamp             time.Time     // When it rejoined
+}
+
+// NodeLeaveEvent represents a node leaving the cluster
+type NodeLeaveEvent struct {
+	Node              *Node     // Full node info (ID, IP, Name, Status)
+	Reason            string    // "health_check_failure", "graceful_shutdown", "removed_by_admin"
+	PartitionsOwned   []string  // Partitions this node was primary for
+	PartitionsReplica []string  // Partitions this node was replica for
+	Timestamp         time.Time // When it left
+}
+
+// RebalanceEvent represents a rebalancing operation
+type RebalanceEvent struct {
+	Trigger          string    // "node_join", "node_leave", "manual"
+	TriggerNodeID    string    // Which node caused it
+	PartitionsToMove int       // How many partitions will move
+	NodesAffected    []string  // Which nodes are affected
+	Timestamp        time.Time // When rebalance started
+}
+
+// ClusterHealthEvent represents cluster health status change
+type ClusterHealthEvent struct {
+	HealthyNodes     int       // Number of healthy nodes
+	UnhealthyNodes   int       // Number of unhealthy nodes
+	TotalNodes       int       // Total nodes in cluster
+	Status           string    // "healthy", "degraded", "critical"
+	UnhealthyNodeIDs []string  // IDs of unhealthy nodes
+	Timestamp        time.Time // When health changed
+}
+
+// ============================================
+// Hook Function Types
+// ============================================
+
+// PartitionChangeHook is called when a partition assignment changes
+type PartitionChangeHook func(event *PartitionChangeEvent)
 
 // NodeJoinHook is called when a new node joins the cluster
-type NodeJoinHook func(node *Node)
+type NodeJoinHook func(event *NodeJoinEvent)
 
 // NodeRejoinHook is called when an existing node rejoins after being offline
 // This fires BEFORE rebalancing - use for preparation (e.g., clearing stale data)
-type NodeRejoinHook func(node *Node)
-
-// NodeRejoinCompleteHook is called AFTER a node rejoins AND partitions are rebalanced
-// This is when you should sync data (partitions are finalized)
-type NodeRejoinCompleteHook func(node *Node)
+type NodeRejoinHook func(event *NodeRejoinEvent)
 
 // NodeLeaveHook is called when a node leaves or is removed from the cluster
-type NodeLeaveHook func(nodeID string)
+type NodeLeaveHook func(event *NodeLeaveEvent)
 
-// HookManager manages partition change hooks
+// RebalanceStartHook is called when a rebalance operation starts
+type RebalanceStartHook func(event *RebalanceEvent)
+
+// RebalanceCompleteHook is called when a rebalance operation completes
+type RebalanceCompleteHook func(event *RebalanceEvent, duration time.Duration)
+
+// ClusterHealthChangeHook is called when cluster health status changes
+type ClusterHealthChangeHook func(event *ClusterHealthEvent)
+
+// HookManager manages all cluster event hooks
 type HookManager struct {
-	hooks              []PartitionChangeHook
-	nodeJoinHooks      []NodeJoinHook
-	nodeRejoinHooks    []NodeRejoinHook
-	nodeLeaveHooks     []NodeLeaveHook
-	lastPartitionState map[string]*Partition // partitionID -> Partition
-	lastNodeSet        map[string]bool       // nodeID -> exists
-	mu                 sync.RWMutex
-	workerPool         chan struct{} // Semaphore for limiting concurrent hook executions
+	hooks                   []PartitionChangeHook
+	nodeJoinHooks           []NodeJoinHook
+	nodeRejoinHooks         []NodeRejoinHook
+	nodeLeaveHooks          []NodeLeaveHook
+	rebalanceStartHooks     []RebalanceStartHook
+	rebalanceCompleteHooks  []RebalanceCompleteHook
+	clusterHealthHooks      []ClusterHealthChangeHook
+	lastPartitionState      map[string]*Partition // partitionID -> Partition
+	lastNodeSet             map[string]bool       // nodeID -> exists
+	lastNodeSeenTime        map[string]time.Time  // nodeID -> last seen timestamp
+	lastHealthStatus        string                // Last cluster health status
+	mu                      sync.RWMutex
+	workerPool              chan struct{} // Semaphore for limiting concurrent hook executions
 }
 
 // NewHookManager creates a new hook manager
@@ -46,13 +114,18 @@ func newHookManager() *HookManager {
 	// Create a worker pool with max 50 concurrent hook executions
 	workerPool := make(chan struct{}, 50)
 	return &HookManager{
-		hooks:              make([]PartitionChangeHook, 0),
-		nodeJoinHooks:      make([]NodeJoinHook, 0),
-		nodeRejoinHooks:    make([]NodeRejoinHook, 0),
-		nodeLeaveHooks:     make([]NodeLeaveHook, 0),
-		lastPartitionState: make(map[string]*Partition),
-		lastNodeSet:        make(map[string]bool),
-		workerPool:         workerPool,
+		hooks:                  make([]PartitionChangeHook, 0),
+		nodeJoinHooks:          make([]NodeJoinHook, 0),
+		nodeRejoinHooks:        make([]NodeRejoinHook, 0),
+		nodeLeaveHooks:         make([]NodeLeaveHook, 0),
+		rebalanceStartHooks:    make([]RebalanceStartHook, 0),
+		rebalanceCompleteHooks: make([]RebalanceCompleteHook, 0),
+		clusterHealthHooks:     make([]ClusterHealthChangeHook, 0),
+		lastPartitionState:     make(map[string]*Partition),
+		lastNodeSet:            make(map[string]bool),
+		lastNodeSeenTime:       make(map[string]time.Time),
+		lastHealthStatus:       "healthy",
+		workerPool:             workerPool,
 	}
 }
 
@@ -84,6 +157,27 @@ func (ck *ClusterKit) OnNodeLeave(hook NodeLeaveHook) {
 	ck.hookManager.nodeLeaveHooks = append(ck.hookManager.nodeLeaveHooks, hook)
 }
 
+// OnRebalanceStart registers a callback for when rebalancing starts
+func (ck *ClusterKit) OnRebalanceStart(hook RebalanceStartHook) {
+	ck.hookManager.mu.Lock()
+	defer ck.hookManager.mu.Unlock()
+	ck.hookManager.rebalanceStartHooks = append(ck.hookManager.rebalanceStartHooks, hook)
+}
+
+// OnRebalanceComplete registers a callback for when rebalancing completes
+func (ck *ClusterKit) OnRebalanceComplete(hook RebalanceCompleteHook) {
+	ck.hookManager.mu.Lock()
+	defer ck.hookManager.mu.Unlock()
+	ck.hookManager.rebalanceCompleteHooks = append(ck.hookManager.rebalanceCompleteHooks, hook)
+}
+
+// OnClusterHealthChange registers a callback for cluster health changes
+func (ck *ClusterKit) OnClusterHealthChange(hook ClusterHealthChangeHook) {
+	ck.hookManager.mu.Lock()
+	defer ck.hookManager.mu.Unlock()
+	ck.hookManager.clusterHealthHooks = append(ck.hookManager.clusterHealthHooks, hook)
+}
+
 // checkPartitionChanges detects and notifies about partition changes
 func (hm *HookManager) checkPartitionChanges(currentPartitions map[string]*Partition, cluster *Cluster) {
 	if len(hm.hooks) == 0 {
@@ -109,7 +203,7 @@ func (hm *HookManager) checkPartitionChanges(currentPartitions map[string]*Parti
 			hm.workerPool <- struct{}{}
 
 			// Execute hook in goroutine
-			go func(h PartitionChangeHook, partID string, fromNodes []*Node, to *Node) {
+			go func(h PartitionChangeHook, event *PartitionChangeEvent) {
 				defer func() {
 					// Release semaphore slot
 					<-hm.workerPool
@@ -118,8 +212,8 @@ func (hm *HookManager) checkPartitionChanges(currentPartitions map[string]*Parti
 						fmt.Printf("Hook panic recovered: %v\n", r)
 					}
 				}()
-				h(partID, fromNodes, to)
-			}(hook, change.PartitionID, change.CopyFromNodes, change.CopyToNode)
+				h(event)
+			}(hook, &change)
 		}
 	}
 
@@ -130,8 +224,8 @@ func (hm *HookManager) checkPartitionChanges(currentPartitions map[string]*Parti
 }
 
 // detectChanges compares old and new partition states
-func (hm *HookManager) detectChanges(old, new map[string]*Partition, cluster *Cluster) []PartitionChange {
-	var changes []PartitionChange
+func (hm *HookManager) detectChanges(old, new map[string]*Partition, cluster *Cluster) []PartitionChangeEvent {
+	var changes []PartitionChangeEvent
 
 	for partitionID, newPartition := range new {
 		oldPartition, exists := old[partitionID]
@@ -205,10 +299,14 @@ func (hm *HookManager) detectChanges(old, new map[string]*Partition, cluster *Cl
 			// Find the target node object
 			copyToNodeObj := getNodeByID(cluster, nodeID)
 
-			changes = append(changes, PartitionChange{
+			changes = append(changes, PartitionChangeEvent{
 				PartitionID:   partitionID,
 				CopyToNode:    copyToNodeObj,
 				CopyFromNodes: copyFromNodes,
+				ChangeReason:  "rebalance", // Default reason, can be enhanced
+				OldPrimary:    oldPartition.PrimaryNode,
+				NewPrimary:    newPartition.PrimaryNode,
+				Timestamp:     time.Now(),
 			})
 		}
 	}
@@ -263,58 +361,91 @@ func getNodeByID(cluster *Cluster, nodeID string) *Node {
 }
 
 // notifyNodeJoin triggers node join hooks
-func (hm *HookManager) notifyNodeJoin(node *Node) {
+func (hm *HookManager) notifyNodeJoin(node *Node, clusterSize int, isBootstrap bool) {
 	hm.mu.RLock()
 	hooks := make([]NodeJoinHook, len(hm.nodeJoinHooks))
 	copy(hooks, hm.nodeJoinHooks)
 	hm.mu.RUnlock()
 
+	event := &NodeJoinEvent{
+		Node:        node,
+		ClusterSize: clusterSize,
+		IsBootstrap: isBootstrap,
+		Timestamp:   time.Now(),
+	}
+
 	for _, hook := range hooks {
-		go func(h NodeJoinHook, n *Node) {
+		go func(h NodeJoinHook, e *NodeJoinEvent) {
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Printf("NodeJoin hook panic recovered: %v\n", r)
 				}
 			}()
-			h(n)
-		}(hook, node)
+			h(e)
+		}(hook, event)
 	}
 }
 
 // notifyNodeRejoin triggers node rejoin hooks
-func (hm *HookManager) notifyNodeRejoin(node *Node) {
+func (hm *HookManager) notifyNodeRejoin(node *Node, partitionsBeforeLeave []string) {
 	hm.mu.RLock()
 	hooks := make([]NodeRejoinHook, len(hm.nodeRejoinHooks))
 	copy(hooks, hm.nodeRejoinHooks)
+	
+	// Calculate offline duration
+	lastSeen := hm.lastNodeSeenTime[node.ID]
+	offlineDuration := time.Since(lastSeen)
+	if lastSeen.IsZero() {
+		offlineDuration = 0 // Unknown
+	}
 	hm.mu.RUnlock()
 
+	event := &NodeRejoinEvent{
+		Node:                  node,
+		OfflineDuration:       offlineDuration,
+		LastSeenAt:            lastSeen,
+		PartitionsBeforeLeave: partitionsBeforeLeave,
+		Timestamp:             time.Now(),
+	}
+
 	for _, hook := range hooks {
-		go func(h NodeRejoinHook, n *Node) {
+		go func(h NodeRejoinHook, e *NodeRejoinEvent) {
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Printf("NodeRejoin hook panic recovered: %v\n", r)
 				}
 			}()
-			h(n)
-		}(hook, node)
+			h(e)
+		}(hook, event)
 	}
 }
 
 // notifyNodeLeave triggers node leave hooks
-func (hm *HookManager) notifyNodeLeave(nodeID string) {
+func (hm *HookManager) notifyNodeLeave(node *Node, reason string, partitionsOwned, partitionsReplica []string) {
 	hm.mu.RLock()
 	hooks := make([]NodeLeaveHook, len(hm.nodeLeaveHooks))
 	copy(hooks, hm.nodeLeaveHooks)
+	
+	// Update last seen time
+	hm.lastNodeSeenTime[node.ID] = time.Now()
 	hm.mu.RUnlock()
 
+	event := &NodeLeaveEvent{
+		Node:              node,
+		Reason:            reason,
+		PartitionsOwned:   partitionsOwned,
+		PartitionsReplica: partitionsReplica,
+		Timestamp:         time.Now(),
+	}
+
 	for _, hook := range hooks {
-		go func(h NodeLeaveHook, id string) {
+		go func(h NodeLeaveHook, e *NodeLeaveEvent) {
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Printf("NodeLeave hook panic recovered: %v\n", r)
 				}
 			}()
-			h(id)
-		}(hook, nodeID)
+			h(e)
+		}(hook, event)
 	}
 }

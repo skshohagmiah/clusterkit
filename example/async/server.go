@@ -31,8 +31,8 @@ func NewKVStore(ck *clusterkit.ClusterKit, nodeID, kvPort string) *KVStore {
 	}
 
 	// Register partition change hook for data migration
-	ck.OnPartitionChange(func(partitionID string, copyFromNodes []*clusterkit.Node, copyTo *clusterkit.Node) {
-		kv.handlePartitionChange(partitionID, copyFromNodes, copyTo)
+	ck.OnPartitionChange(func(event *clusterkit.PartitionChangeEvent) {
+		kv.handlePartitionChange(event.PartitionID, event.CopyFromNodes, event.CopyToNode)
 	})
 
 	return kv

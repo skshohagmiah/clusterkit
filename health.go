@@ -185,6 +185,34 @@ func (hc *HealthChecker) removeNode(nodeID string) {
 
 	fmt.Printf("[HEALTH] Removing failed node %s from cluster\n", nodeID)
 
+	// Get node info and partitions before removal
+	hc.ck.mu.RLock()
+	var node *Node
+	var partitionsOwned, partitionsReplica []string
+	
+	for i := range hc.ck.cluster.Nodes {
+		if hc.ck.cluster.Nodes[i].ID == nodeID {
+			nodeCopy := hc.ck.cluster.Nodes[i]
+			node = &nodeCopy
+			break
+		}
+	}
+	
+	if hc.ck.cluster.PartitionMap != nil {
+		for _, partition := range hc.ck.cluster.PartitionMap.Partitions {
+			if partition.PrimaryNode == nodeID {
+				partitionsOwned = append(partitionsOwned, partition.ID)
+			}
+			for _, replicaID := range partition.ReplicaNodes {
+				if replicaID == nodeID {
+					partitionsReplica = append(partitionsReplica, partition.ID)
+					break
+				}
+			}
+		}
+	}
+	hc.ck.mu.RUnlock()
+
 	// Remove from Raft cluster
 	if err := hc.ck.consensusManager.RemoveServer(nodeID); err != nil {
 		fmt.Printf("[HEALTH] Failed to remove from Raft: %v\n", err)
@@ -200,7 +228,9 @@ func (hc *HealthChecker) removeNode(nodeID string) {
 	}
 
 	// Trigger node leave hook
-	hc.ck.hookManager.notifyNodeLeave(nodeID)
+	if node != nil {
+		hc.ck.hookManager.notifyNodeLeave(node, "health_check_failure", partitionsOwned, partitionsReplica)
+	}
 
 	// Clear failure tracking
 	hc.mu.Lock()
