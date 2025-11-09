@@ -384,7 +384,7 @@ func main() {
 	}
 
 	// Initialize ClusterKit
-	ck, err := clusterkit.NewClusterKit(clusterkit.Options{
+	ck, err := clusterkit.New(clusterkit.Options{
 		NodeID:            nodeID,
 		HTTPAddr:          ":" + httpPort,
 		JoinAddr:          joinAddr,
