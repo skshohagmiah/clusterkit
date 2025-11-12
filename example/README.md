@@ -72,6 +72,46 @@ primary := ck.GetPrimary(partition)
 // Forward request to primary if needed
 ```
 
+## Service Discovery
+
+ClusterKit now includes **service discovery** to help smart clients find your application services:
+
+### Server Registration
+```go
+// Register your application services
+ck, err := clusterkit.New(clusterkit.Options{
+    NodeID:   "node-1",
+    HTTPAddr: ":8080",  // ClusterKit coordination API
+    Services: map[string]string{
+        "kv":   ":9080",     // Your KV store API
+        "api":  ":3000",     // Your REST API
+        "grpc": ":50051",    // Your gRPC service
+    },
+})
+```
+
+### Smart Client Discovery
+```go
+// Get cluster topology with services
+resp := client.Get("http://localhost:8080/cluster")
+
+// Extract service addresses for each node
+for _, node := range cluster.Nodes {
+    kvAddr := node.Services["kv"]      // ":9080"
+    apiAddr := node.Services["api"]    // ":3000"
+    
+    // Route requests to the right service
+    routeToKV(node.ID, kvAddr)
+    routeToAPI(node.ID, apiAddr)
+}
+```
+
+### Benefits
+- **🎯 No hardcoded ports**: Services are explicitly registered
+- **🔧 Multi-service nodes**: HTTP + gRPC + WebSocket on same node
+- **📡 Automatic discovery**: Clients find services dynamically
+- **⚖️ Load balancing**: Route different request types to different services
+
 ## What ClusterKit Provides
 
 ClusterKit is a **coordination library** that tells you:
@@ -81,6 +121,7 @@ ClusterKit is a **coordination library** that tells you:
 - ✅ Whether current node is primary or replica
 - ✅ Automatic rebalancing when nodes join/leave
 - ✅ Leader election and consensus (Raft)
+- ✅ **Service discovery** for application endpoints
 
 ## What You Implement
 

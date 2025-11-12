@@ -7,11 +7,12 @@ import (
 
 // Node represents a single node in the cluster
 type Node struct {
-	ID     string `json:"id"`
-	IP     string `json:"ip"`
-	Port   int    `json:"port"`
-	Name   string `json:"name"`
-	Status string `json:"status"`
+	ID       string            `json:"id"`
+	IP       string            `json:"ip"`
+	Port     int               `json:"port"`
+	Name     string            `json:"name"`
+	Status   string            `json:"status"`
+	Services map[string]string `json:"services,omitempty"` // Service name -> address mapping
 }
 
 // Partition represents a data partition in the cluster

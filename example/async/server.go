@@ -15,11 +15,11 @@ import (
 
 // KVStore with ASYNC replication (primary-first, background replication)
 type KVStore struct {
-	ck       *clusterkit.ClusterKit
-	data     map[string]string
-	mu       sync.RWMutex
-	nodeID   string
-	kvPort   string
+	ck     *clusterkit.ClusterKit
+	data   map[string]string
+	mu     sync.RWMutex
+	nodeID string
+	kvPort string
 }
 
 func NewKVStore(ck *clusterkit.ClusterKit, nodeID, kvPort string) *KVStore {
@@ -89,7 +89,7 @@ func (kv *KVStore) handleGet(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"key": key, "value": value})
 		return
 	}
-	
+
 	http.Error(w, "key not found", http.StatusNotFound)
 }
 
@@ -155,7 +155,7 @@ func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*cl
 
 	// Merge data from ALL source nodes
 	mergedData := make(map[string]string)
-	
+
 	for _, sourceNode := range copyFromNodes {
 		// Fetch data from this source node
 		url := fmt.Sprintf("http://localhost:%s/kv/migrate?partition=%s", extractPort(sourceNode.IP), partitionID)
@@ -183,7 +183,7 @@ func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*cl
 		for key, value := range migrationData.Keys {
 			mergedData[key] = value
 		}
-		
+
 		log.Printf("[KV-%s] 📦 Fetched %d keys from %s\n", kv.nodeID, migrationData.Count, sourceNode.ID)
 	}
 
@@ -194,7 +194,7 @@ func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*cl
 	}
 	kv.mu.Unlock()
 
-	log.Printf("[KV-%s] ✅ Migrated %d keys for partition %s from %d sources\n", 
+	log.Printf("[KV-%s] ✅ Migrated %d keys for partition %s from %d sources\n",
 		kv.nodeID, len(mergedData), partitionID, len(copyFromNodes))
 }
 
@@ -219,7 +219,7 @@ func main() {
 	}
 
 	// Initialize ClusterKit
-	ck, err := clusterkit.NewClusterKit(clusterkit.Options{
+	ck, err := clusterkit.New(clusterkit.Options{
 		NodeID:            nodeID,
 		HTTPAddr:          ":" + httpPort,
 		JoinAddr:          joinAddr,
@@ -227,6 +227,9 @@ func main() {
 		PartitionCount:    64,
 		ReplicationFactor: 3,
 		Bootstrap:         joinAddr == "",
+		Services: map[string]string{
+			"kv": ":" + kvPort, // Register KV service for smart client discovery
+		},
 		HealthCheck: clusterkit.HealthCheckConfig{
 			Enabled:          true,
 			Interval:         5 * time.Second,

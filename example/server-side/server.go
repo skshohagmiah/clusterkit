@@ -54,9 +54,9 @@ func (kv *KVStore) Start() error {
 // SERVER-SIDE: Check if I'm primary/replica and handle accordingly
 func (kv *KVStore) handleSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Key      string `json:"key"`
-		Value    string `json:"value"`
-		Replicate bool  `json:"replicate,omitempty"` // Internal flag
+		Key       string `json:"key"`
+		Value     string `json:"value"`
+		Replicate bool   `json:"replicate,omitempty"` // Internal flag
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -100,7 +100,7 @@ func (kv *KVStore) handleSet(w http.ResponseWriter, r *http.Request) {
 
 		// Log warning if this is a direct client write (not replication)
 		if !req.Replicate {
-			fmt.Printf("[KV-%s] ⚠️  Replica accepting write for %s (primary may be down)\n", 
+			fmt.Printf("[KV-%s] ⚠️  Replica accepting write for %s (primary may be down)\n",
 				kv.nodeID, partition.ID)
 		}
 
@@ -191,7 +191,7 @@ func (kv *KVStore) handleGet(w http.ResponseWriter, r *http.Request) {
 
 func (kv *KVStore) handleDelete(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
-	
+
 	partition, err := kv.ck.GetPartition(key)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -249,24 +249,24 @@ func (kv *KVStore) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"node_id":         kv.nodeID,
-		"total_keys":      totalKeys,
+		"node_id":            kv.nodeID,
+		"total_keys":         totalKeys,
 		"primary_partitions": primaryCount,
 		"replica_partitions": replicaCount,
-		"mode":            "server-side",
+		"mode":               "server-side",
 	})
 }
 
 func (kv *KVStore) handlePartitions(w http.ResponseWriter, r *http.Request) {
 	partitions := kv.ck.GetPartitionsForNode(kv.nodeID)
-	
+
 	result := make([]map[string]interface{}, 0)
 	for _, p := range partitions {
 		role := "replica"
 		if kv.ck.IsPrimary(p) {
 			role = "primary"
 		}
-		
+
 		result = append(result, map[string]interface{}{
 			"partition_id": p.ID,
 			"role":         role,
@@ -308,7 +308,7 @@ func (kv *KVStore) handleMigrate(w http.ResponseWriter, r *http.Request) {
 // Replication helpers
 func (kv *KVStore) replicateToReplicas(partition *clusterkit.Partition, key, value string) {
 	replicas := kv.ck.GetReplicas(partition)
-	
+
 	for _, replica := range replicas {
 		payload := map[string]interface{}{
 			"key":       key,
@@ -327,7 +327,7 @@ func (kv *KVStore) replicateToReplicas(partition *clusterkit.Partition, key, val
 
 func (kv *KVStore) replicateDeletion(partition *clusterkit.Partition, key string) {
 	replicas := kv.ck.GetReplicas(partition)
-	
+
 	for _, replica := range replicas {
 		url := fmt.Sprintf("http://%s/kv/delete?key=%s", replica.IP, key)
 		resp, err := http.Get(url)
@@ -374,7 +374,7 @@ func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*cl
 
 	// Merge data from ALL source nodes
 	mergedData := make(map[string]string)
-	
+
 	for _, sourceNode := range copyFromNodes {
 		// Request all keys for this partition from the source node
 		url := fmt.Sprintf("http://%s/kv/migrate?partition=%s", sourceNode.IP, partitionID)
@@ -401,7 +401,7 @@ func (kv *KVStore) handlePartitionChange(partitionID string, copyFromNodes []*cl
 		for key, value := range migrationData.Keys {
 			mergedData[key] = value
 		}
-		
+
 		fmt.Printf("[KV-%s] 📦 Fetched %d keys from %s\n", kv.nodeID, migrationData.Count, sourceNode.ID)
 	}
 
@@ -432,7 +432,7 @@ func main() {
 	}
 
 	// Initialize ClusterKit
-	ck, err := clusterkit.NewClusterKit(clusterkit.Options{
+	ck, err := clusterkit.New(clusterkit.Options{
 		NodeID:            nodeID,
 		HTTPAddr:          ":" + httpPort,
 		DataDir:           dataDir,
@@ -440,6 +440,9 @@ func main() {
 		PartitionCount:    64,
 		ReplicationFactor: 3,
 		Bootstrap:         joinAddr == "",
+		Services: map[string]string{
+			"kv": ":" + kvPort, // Register KV service for smart client discovery
+		},
 	})
 	if err != nil {
 		log.Fatal(err)

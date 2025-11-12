@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -24,9 +25,9 @@ type ClusterKit struct {
 	stopChan         chan struct{}
 	syncInterval     time.Duration
 	consensusManager *ConsensusManager
-	hookManager      *HookManager // Partition change hooks
+	hookManager      *HookManager   // Partition change hooks
 	healthChecker    *HealthChecker // Health monitoring
-	logger           Logger       // Structured logger
+	logger           Logger         // Structured logger
 	// Metrics tracking
 	startTime    time.Time
 	lastSync     time.Time
@@ -39,31 +40,34 @@ type Options struct {
 	// Required
 	NodeID   string // Unique ID for this node (e.g., "node-1")
 	HTTPAddr string // Address to listen on (e.g., ":8080")
-	
+
 	// Optional - Auto-generated if not provided
-	NodeName          string        // Human-readable name (default: auto-generated from NodeID)
-	RaftAddr          string        // Raft bind address (default: auto-calculated from HTTPAddr)
-	DataDir           string        // Directory to store state (default: "./clusterkit-data")
-	SyncInterval      time.Duration // Sync interval (default: 5s)
-	
+	NodeName     string        // Human-readable name (default: auto-generated from NodeID)
+	RaftAddr     string        // Raft bind address (default: auto-calculated from HTTPAddr)
+	DataDir      string        // Directory to store state (default: "./clusterkit-data")
+	SyncInterval time.Duration // Sync interval (default: 5s)
+
 	// Cluster Configuration - Flattened (no nested Config struct)
 	ClusterName       string // Name of the cluster (default: "clusterkit-cluster")
 	PartitionCount    int    // Number of partitions (default: 16)
 	ReplicationFactor int    // Replication factor (default: 3)
-	
+
 	// Cluster Formation
 	JoinAddr  string // Address of existing node to join (empty for first node)
 	Bootstrap bool   // Set to true for first node (default: auto-detect)
-	
+
 	// Health Checking
 	HealthCheck HealthCheckConfig // Health check configuration
-	
+
+	// Application Services
+	Services map[string]string // Service name -> address mapping (e.g., {"kv": ":9080", "api": ":3000"})
+
 	// Optional Logger
 	Logger Logger // Custom logger (default: DefaultLogger with Info level)
 }
 
-// NewClusterKit initializes a new ClusterKit instance
-func NewClusterKit(opts Options) (*ClusterKit, error) {
+// New initializes a new ClusterKit instance
+func New(opts Options) (*ClusterKit, error) {
 	// Validate required fields
 	if opts.NodeID == "" {
 		return nil, fmt.Errorf("NodeID is required")
@@ -71,17 +75,33 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 	if opts.HTTPAddr == "" {
 		return nil, fmt.Errorf("HTTPAddr is required")
 	}
-	
+
+	// Validate service addresses
+	if opts.Services != nil {
+		for serviceName, serviceAddr := range opts.Services {
+			if serviceName == "" {
+				return nil, fmt.Errorf("service name cannot be empty")
+			}
+			if serviceAddr == "" {
+				return nil, fmt.Errorf("service address for '%s' cannot be empty", serviceName)
+			}
+			// Basic address format validation
+			if serviceAddr[0] != ':' && !strings.Contains(serviceAddr, ":") {
+				return nil, fmt.Errorf("invalid service address format for '%s': %s (expected format: ':port' or 'host:port')", serviceName, serviceAddr)
+			}
+		}
+	}
+
 	// Auto-generate NodeName from NodeID if not provided
 	if opts.NodeName == "" {
 		opts.NodeName = generateNodeName(opts.NodeID)
 	}
-	
+
 	// Auto-calculate RaftAddr from HTTPAddr if not provided
 	if opts.RaftAddr == "" {
 		opts.RaftAddr = calculateRaftAddr(opts.HTTPAddr)
 	}
-	
+
 	// Set defaults for cluster configuration
 	if opts.ClusterName == "" {
 		opts.ClusterName = "clusterkit-cluster"
@@ -92,7 +112,7 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 	if opts.ReplicationFactor <= 0 {
 		opts.ReplicationFactor = 3
 	}
-	
+
 	// Set defaults for optional fields
 	if opts.DataDir == "" {
 		opts.DataDir = "./clusterkit-data"
@@ -123,10 +143,11 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 
 	// Add self as a node
 	selfNode := Node{
-		ID:     opts.NodeID,
-		Name:   opts.NodeName,
-		IP:     opts.HTTPAddr,
-		Status: "active",
+		ID:       opts.NodeID,
+		Name:     opts.NodeName,
+		IP:       opts.HTTPAddr,
+		Status:   "active",
+		Services: opts.Services, // Include application services
 	}
 	cluster.Nodes = append(cluster.Nodes, selfNode)
 	cluster.rebuildNodeMap() // Initialize NodeMap for O(1) lookups
@@ -136,7 +157,7 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 	if logger == nil {
 		logger = NewDefaultLogger(LogLevelInfo)
 	}
-	
+
 	// Initialize ClusterKit
 	ck := &ClusterKit{
 		cluster:      cluster,
@@ -150,7 +171,7 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 		logger:       logger,
 		startTime:    time.Now(),
 	}
-	
+
 	// Set join address if provided
 	if opts.JoinAddr != "" {
 		ck.knownNodes = []string{opts.JoinAddr}
@@ -160,11 +181,7 @@ func NewClusterKit(opts Options) (*ClusterKit, error) {
 	ck.consensusManager = NewConsensusManager(ck, opts.Bootstrap, opts.RaftAddr)
 
 	// Initialize hook manager
-	ck.hookManager = &HookManager{
-		hooks:              []PartitionChangeHook{},
-		lastPartitionState: make(map[string]*Partition),
-		workerPool:         make(chan struct{}, 50),
-	}
+	ck.hookManager = newHookManager()
 
 	// Initialize health checker
 	ck.healthChecker = NewHealthChecker(ck, opts.HealthCheck)
@@ -205,61 +222,62 @@ func (ck *ClusterKit) Start() error {
 		go func() {
 			// Wait for leader election
 			time.Sleep(3 * time.Second)
-			
+
 			// Bootstrap node: Propose self addition through Raft to ensure all nodes have it
 			if ck.consensusManager.IsLeader() {
 				ck.mu.RLock()
 				selfNode := ck.cluster.Nodes[0] // Bootstrap node is always first
 				ck.mu.RUnlock()
-				
+
 				fmt.Printf("Bootstrap node proposing self through Raft: %s\n", selfNode.ID)
 				if err := ck.consensusManager.ProposeAction("add_node", map[string]interface{}{
-					"id":     selfNode.ID,
-					"name":   selfNode.Name,
-					"ip":     selfNode.IP,
-					"status": selfNode.Status,
+					"id":       selfNode.ID,
+					"name":     selfNode.Name,
+					"ip":       selfNode.IP,
+					"status":   selfNode.Status,
+					"services": selfNode.Services,
 				}); err != nil {
 					fmt.Printf("Warning: Failed to propose bootstrap node: %v\n", err)
 				}
-				
+
 				// Wait for Raft replication
 				time.Sleep(1 * time.Second)
 			}
-			
+
 			ck.mu.RLock()
 			replicationFactor := ck.cluster.Config.ReplicationFactor
 			ck.mu.RUnlock()
-			
+
 			// Wait for enough nodes to join (up to 30 seconds)
 			maxWait := 30
 			if replicationFactor == 1 {
 				maxWait = 3 // Single-node clusters don't need to wait long
 			}
-			
+
 			for i := 0; i < maxWait; i++ {
 				if !ck.consensusManager.IsLeader() {
 					return // Not leader anymore
 				}
-				
+
 				ck.mu.RLock()
 				nodeCount := len(ck.cluster.Nodes)
 				partitionCount := len(ck.cluster.PartitionMap.Partitions)
 				ck.mu.RUnlock()
-				
+
 				// If partitions already exist, we're done
 				if partitionCount > 0 {
 					return
 				}
-				
+
 				// Create partitions if we have enough nodes
 				if nodeCount >= replicationFactor {
 					// Deduplicate nodes before creating partitions
 					ck.deduplicateNodes()
-					
+
 					ck.mu.RLock()
 					finalNodeCount := len(ck.cluster.Nodes)
 					ck.mu.RUnlock()
-					
+
 					fmt.Printf("Auto-creating partitions with %d nodes (replication factor: %d)...\n", finalNodeCount, replicationFactor)
 					if err := ck.CreatePartitions(); err != nil {
 						fmt.Printf("Failed to auto-create partitions: %v\n", err)
@@ -269,16 +287,16 @@ func (ck *ClusterKit) Start() error {
 						return // Success!
 					}
 				}
-				
+
 				// Wait before checking again
 				time.Sleep(1 * time.Second)
 			}
-			
+
 			// Timeout reached - log warning
 			ck.mu.RLock()
 			nodeCount := len(ck.cluster.Nodes)
 			ck.mu.RUnlock()
-			fmt.Printf("Warning: Partition auto-creation timed out after %d seconds (have %d nodes, need %d)\n", 
+			fmt.Printf("Warning: Partition auto-creation timed out after %d seconds (have %d nodes, need %d)\n",
 				maxWait, nodeCount, replicationFactor)
 		}()
 	}
@@ -418,14 +436,14 @@ func (ck *ClusterKit) GetMetrics() *Metrics {
 	}
 
 	return &Metrics{
-		NodeCount:       len(ck.cluster.Nodes),
-		PartitionCount:  len(ck.cluster.PartitionMap.Partitions),
-		RequestCount:    ck.requestCount,
-		ErrorCount:      ck.errorCount,
-		LastSync:        ck.lastSync,
-		IsLeader:        isLeader,
-		RaftState:       raftState,
-		UptimeSeconds:   int64(time.Since(ck.startTime).Seconds()),
+		NodeCount:      len(ck.cluster.Nodes),
+		PartitionCount: len(ck.cluster.PartitionMap.Partitions),
+		RequestCount:   ck.requestCount,
+		ErrorCount:     ck.errorCount,
+		LastSync:       ck.lastSync,
+		IsLeader:       isLeader,
+		RaftState:      raftState,
+		UptimeSeconds:  int64(time.Since(ck.startTime).Seconds()),
 	}
 }
 
@@ -451,7 +469,7 @@ func (ck *ClusterKit) HealthCheck() *HealthStatus {
 	}
 
 	uptime := time.Since(ck.startTime)
-	
+
 	return &HealthStatus{
 		Healthy:        true,
 		NodeID:         nodeID,
@@ -469,27 +487,27 @@ func (ck *ClusterKit) HealthCheck() *HealthStatus {
 // Examples: "node-1" -> "Server-1", "server-2" -> "Server-2"
 func generateNodeName(nodeID string) string {
 	var num int
-	
+
 	// Try "node-N" pattern
 	if _, err := fmt.Sscanf(nodeID, "node-%d", &num); err == nil {
 		return fmt.Sprintf("Server-%d", num)
 	}
-	
+
 	// Try "server-N" pattern
 	if _, err := fmt.Sscanf(nodeID, "server-%d", &num); err == nil {
 		return fmt.Sprintf("Server-%d", num)
 	}
-	
+
 	// Try just "N" pattern
 	if _, err := fmt.Sscanf(nodeID, "%d", &num); err == nil {
 		return fmt.Sprintf("Server-%d", num)
 	}
-	
+
 	// Default: capitalize first letter
 	if len(nodeID) > 0 {
 		return string(nodeID[0]-32) + nodeID[1:]
 	}
-	
+
 	return nodeID
 }
 
@@ -498,7 +516,7 @@ func generateNodeName(nodeID string) string {
 // Uses port range 10001+ to avoid conflicts with common application ports (9000-9999)
 func calculateRaftAddr(httpAddr string) string {
 	var port int
-	
+
 	// Try to extract port from HTTP address
 	if _, err := fmt.Sscanf(httpAddr, ":%d", &port); err == nil {
 		// Calculate Raft port: 10001 + (httpPort - 8080)
@@ -506,7 +524,7 @@ func calculateRaftAddr(httpAddr string) string {
 		raftPort := 10001 + (port - 8080)
 		return fmt.Sprintf("127.0.0.1:%d", raftPort)
 	}
-	
+
 	// Default to 10001
 	return "127.0.0.1:10001"
 }

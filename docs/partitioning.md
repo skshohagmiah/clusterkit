@@ -642,7 +642,7 @@ fetchDataFromSource()
 nodes := 10
 partitions := nodes * 15  // 150 partitions
 
-ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
+ck, _ := clusterkit.New(clusterkit.Options{
     PartitionCount: partitions,
 })
 ```
@@ -653,7 +653,7 @@ ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
 // Survives N-1 node failures
 replicationFactor := 3  // Survives 2 failures
 
-ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
+ck, _ := clusterkit.New(clusterkit.Options{
     ReplicationFactor: replicationFactor,
 })
 ```

@@ -392,6 +392,9 @@ func main() {
 		PartitionCount:    64,
 		ReplicationFactor: 3,
 		Bootstrap:         joinAddr == "",
+		Services: map[string]string{
+			"kv": ":" + kvPort, // Register KV service for smart client discovery
+		},
 		HealthCheck: clusterkit.HealthCheckConfig{
 			Enabled:          true,
 			Interval:         5 * time.Second,
