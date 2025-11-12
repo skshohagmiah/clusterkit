@@ -181,11 +181,7 @@ func New(opts Options) (*ClusterKit, error) {
 	ck.consensusManager = NewConsensusManager(ck, opts.Bootstrap, opts.RaftAddr)
 
 	// Initialize hook manager
-	ck.hookManager = &HookManager{
-		hooks:              []PartitionChangeHook{},
-		lastPartitionState: make(map[string]*Partition),
-		workerPool:         make(chan struct{}, 50),
-	}
+	ck.hookManager = newHookManager()
 
 	// Initialize health checker
 	ck.healthChecker = NewHealthChecker(ck, opts.HealthCheck)

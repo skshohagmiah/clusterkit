@@ -23,10 +23,10 @@ type PartitionChangeEvent struct {
 
 // NodeJoinEvent represents a node joining the cluster
 type NodeJoinEvent struct {
-	Node          *Node     // The joining node
-	ClusterSize   int       // Total nodes after join
-	IsBootstrap   bool      // Is this the first node?
-	Timestamp     time.Time // When the node joined
+	Node        *Node     // The joining node
+	ClusterSize int       // Total nodes after join
+	IsBootstrap bool      // Is this the first node?
+	Timestamp   time.Time // When the node joined
 }
 
 // NodeRejoinEvent represents a node rejoining after being offline
@@ -94,19 +94,19 @@ type ClusterHealthChangeHook func(event *ClusterHealthEvent)
 
 // HookManager manages all cluster event hooks
 type HookManager struct {
-	hooks                   []PartitionChangeHook
-	nodeJoinHooks           []NodeJoinHook
-	nodeRejoinHooks         []NodeRejoinHook
-	nodeLeaveHooks          []NodeLeaveHook
-	rebalanceStartHooks     []RebalanceStartHook
-	rebalanceCompleteHooks  []RebalanceCompleteHook
-	clusterHealthHooks      []ClusterHealthChangeHook
-	lastPartitionState      map[string]*Partition // partitionID -> Partition
-	lastNodeSet             map[string]bool       // nodeID -> exists
-	lastNodeSeenTime        map[string]time.Time  // nodeID -> last seen timestamp
-	lastHealthStatus        string                // Last cluster health status
-	mu                      sync.RWMutex
-	workerPool              chan struct{} // Semaphore for limiting concurrent hook executions
+	hooks                  []PartitionChangeHook
+	nodeJoinHooks          []NodeJoinHook
+	nodeRejoinHooks        []NodeRejoinHook
+	nodeLeaveHooks         []NodeLeaveHook
+	rebalanceStartHooks    []RebalanceStartHook
+	rebalanceCompleteHooks []RebalanceCompleteHook
+	clusterHealthHooks     []ClusterHealthChangeHook
+	lastPartitionState     map[string]*Partition // partitionID -> Partition
+	lastNodeSet            map[string]bool       // nodeID -> exists
+	lastNodeSeenTime       map[string]time.Time  // nodeID -> last seen timestamp
+	lastHealthStatus       string                // Last cluster health status
+	mu                     sync.RWMutex
+	workerPool             chan struct{} // Semaphore for limiting concurrent hook executions
 }
 
 // NewHookManager creates a new hook manager
@@ -314,26 +314,6 @@ func (hm *HookManager) detectChanges(old, new map[string]*Partition, cluster *Cl
 	return changes
 }
 
-// replicasChanged checks if replica sets are different
-func (hm *HookManager) replicasChanged(old, new []string) bool {
-	if len(old) != len(new) {
-		return true
-	}
-
-	oldSet := make(map[string]bool)
-	for _, r := range old {
-		oldSet[r] = true
-	}
-
-	for _, r := range new {
-		if !oldSet[r] {
-			return true
-		}
-	}
-
-	return false
-}
-
 // copyPartitionMap creates a deep copy of partition map
 func (hm *HookManager) copyPartitionMap(partitions map[string]*Partition) map[string]*Partition {
 	result := make(map[string]*Partition)
@@ -391,7 +371,7 @@ func (hm *HookManager) notifyNodeRejoin(node *Node, partitionsBeforeLeave []stri
 	hm.mu.RLock()
 	hooks := make([]NodeRejoinHook, len(hm.nodeRejoinHooks))
 	copy(hooks, hm.nodeRejoinHooks)
-	
+
 	// Calculate offline duration
 	lastSeen := hm.lastNodeSeenTime[node.ID]
 	offlineDuration := time.Since(lastSeen)
@@ -425,7 +405,7 @@ func (hm *HookManager) notifyNodeLeave(node *Node, reason string, partitionsOwne
 	hm.mu.RLock()
 	hooks := make([]NodeLeaveHook, len(hm.nodeLeaveHooks))
 	copy(hooks, hm.nodeLeaveHooks)
-	
+
 	// Update last seen time
 	hm.lastNodeSeenTime[node.ID] = time.Now()
 	hm.mu.RUnlock()
