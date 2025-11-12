@@ -215,10 +215,11 @@ func (ck *ClusterKit) handleJoin(w http.ResponseWriter, r *http.Request) {
 
 	// Propose node addition through Raft consensus
 	if err := cm.ProposeAction("add_node", map[string]interface{}{
-		"id":     node.ID,
-		"name":   node.Name,
-		"ip":     node.IP,
-		"status": node.Status,
+		"id":       node.ID,
+		"name":     node.Name,
+		"ip":       node.IP,
+		"status":   node.Status,
+		"services": node.Services,
 	}); err != nil {
 		http.Error(w, fmt.Sprintf("failed to propose: %v", err), http.StatusInternalServerError)
 		return
@@ -393,10 +394,11 @@ func (ck *ClusterKit) joinNode(nodeAddr string) error {
 	}
 
 	selfNode := Node{
-		ID:     nodeID,
-		Name:   nodeName,
-		IP:     ck.httpAddr,
-		Status: "active",
+		ID:       nodeID,
+		Name:     nodeName,
+		IP:       ck.httpAddr,
+		Status:   "active",
+		Services: ck.cluster.Nodes[0].Services, // Include services from self node
 	}
 
 	joinReq := map[string]interface{}{

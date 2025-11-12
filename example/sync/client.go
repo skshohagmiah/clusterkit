@@ -23,7 +23,15 @@ type Client struct {
 
 type Topology struct {
 	Partitions map[string]*PartitionInfo
-	Nodes      map[string]string
+	Nodes      map[string]*NodeInfo
+}
+
+type NodeInfo struct {
+	ID       string            `json:"id"`
+	IP       string            `json:"ip"`
+	Name     string            `json:"name"`
+	Status   string            `json:"status"`
+	Services map[string]string `json:"services,omitempty"`
 }
 
 type HashConfig struct {
@@ -45,7 +53,7 @@ func NewClient(nodes []string) (*Client, error) {
 		nodes:      nodes,
 		topology: &Topology{
 			Partitions: make(map[string]*PartitionInfo),
-			Nodes:      make(map[string]string),
+			Nodes:      make(map[string]*NodeInfo),
 		},
 	}
 
@@ -200,18 +208,31 @@ func (c *Client) getPartitionID(key string) string {
 
 func (c *Client) getNodeAddr(nodeID string) string {
 	c.mu.RLock()
-	httpAddr := c.topology.Nodes[nodeID]
+	nodeInfo := c.topology.Nodes[nodeID]
 	c.mu.RUnlock()
 
-	// Convert HTTP port to KV port
-	// Example: ":8080" -> "localhost:9080"
+	if nodeInfo == nil {
+		return ""
+	}
+
+	// Use service discovery to get KV service address
+	if kvAddr, exists := nodeInfo.Services["kv"]; exists {
+		// Convert relative address to full address
+		// Example: ":9080" -> "localhost:9080"
+		if kvAddr[0] == ':' {
+			return "localhost" + kvAddr
+		}
+		return kvAddr
+	}
+
+	// Fallback to old method if no service registered
 	var httpPort int
-	if _, err := fmt.Sscanf(httpAddr, ":%d", &httpPort); err == nil {
+	if _, err := fmt.Sscanf(nodeInfo.IP, ":%d", &httpPort); err == nil {
 		kvPort := httpPort + 1000 // 8080 -> 9080, 8081 -> 9081, etc.
 		return fmt.Sprintf("localhost:%d", kvPort)
 	}
 
-	return httpAddr
+	return nodeInfo.IP
 }
 
 func (c *Client) refreshTopology() error {
@@ -225,10 +246,7 @@ func (c *Client) refreshTopology() error {
 
 		var apiResponse struct {
 			Cluster struct {
-				Nodes []struct {
-					ID string `json:"id"`
-					IP string `json:"ip"`
-				} `json:"nodes"`
+				Nodes []NodeInfo `json:"nodes"`
 				PartitionMap struct {
 					Partitions map[string]struct {
 						ID           string   `json:"id"`
@@ -251,7 +269,13 @@ func (c *Client) refreshTopology() error {
 
 		// Update nodes
 		for _, n := range apiResponse.Cluster.Nodes {
-			c.topology.Nodes[n.ID] = n.IP
+			c.topology.Nodes[n.ID] = &NodeInfo{
+				ID:       n.ID,
+				IP:       n.IP,
+				Name:     n.Name,
+				Status:   n.Status,
+				Services: n.Services,
+			}
 		}
 		// Update partitions
 		for _, p := range apiResponse.Cluster.PartitionMap.Partitions {

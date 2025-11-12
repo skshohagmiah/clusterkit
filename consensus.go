@@ -100,11 +100,25 @@ func (f *clusterFSM) applyAddNode(data interface{}) error {
 		status = "active" // Default status
 	}
 
+	// Extract services if present
+	var services map[string]string
+	if servicesData, exists := nodeData["services"]; exists {
+		if servicesMap, ok := servicesData.(map[string]interface{}); ok {
+			services = make(map[string]string)
+			for k, v := range servicesMap {
+				if strVal, ok := v.(string); ok {
+					services[k] = strVal
+				}
+			}
+		}
+	}
+
 	node := Node{
-		ID:     id,
-		Name:   name,
-		IP:     ip,
-		Status: status,
+		ID:       id,
+		Name:     name,
+		IP:       ip,
+		Status:   status,
+		Services: services,
 	}
 
 	// Lock cluster state for thread-safe modification
@@ -142,7 +156,7 @@ func (f *clusterFSM) applyAddNode(data interface{}) error {
 func (f *clusterFSM) applyRemoveNode(data interface{}) error {
 	// Handle both string and map formats
 	var nodeID string
-	
+
 	switch v := data.(type) {
 	case string:
 		nodeID = v

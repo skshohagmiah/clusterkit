@@ -23,7 +23,7 @@ Best practices for deploying ClusterKit in production environments.
 ### Production Configuration
 
 ```go
-ck, err := clusterkit.NewClusterKit(clusterkit.Options{
+ck, err := clusterkit.New(clusterkit.Options{
     // Required
     NodeID:   os.Getenv("NODE_ID"),
     HTTPAddr: ":" + os.Getenv("HTTP_PORT"),

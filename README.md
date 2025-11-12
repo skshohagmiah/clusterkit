@@ -10,7 +10,7 @@
 
 ClusterKit handles cluster coordination so you can focus on building your application.
 
-[Features](#-key-features) • [Quick Start](#-quick-start) • [Documentation](#-documentation) • [Examples](#-examples)
+[Features](#-key-features) • [Quick Start](#-quick-start) • [Service Discovery](#-service-discovery) • [Event Hooks](#-event-hooks-system) • [Documentation](#-documentation) • [Examples](#-examples)
 
 ---
 
@@ -57,6 +57,7 @@ ClusterKit is a coordination library that manages the distributed aspects of you
 
 - ✅ **Partition Management** - Consistent hashing to determine which partition owns a key
 - ✅ **Node Discovery** - Automatic cluster membership and health monitoring
+- ✅ **Service Discovery** - Register and discover application services across nodes
 - ✅ **Leader Election** - Raft-based consensus for cluster decisions
 - ✅ **Rebalancing** - Automatic partition redistribution when nodes join/leave
 - ✅ **Event Hooks** - Rich notifications for partition changes, node lifecycle events
@@ -76,6 +77,7 @@ ClusterKit is a coordination library that manages the distributed aspects of you
 ### Core Capabilities
 - **Simple API** - 7 core methods + rich event hooks
 - **Minimal Configuration** - Only 2 required fields (NodeID, HTTPAddr)
+- **Service Discovery** - Register multiple services per node (HTTP, gRPC, WebSocket, etc.)
 - **Production-Ready** - WAL, snapshots, crash recovery, metrics
 - **Health Checking** - Automatic failure detection and node removal
 - **Smart Rejoin** - Detects returning nodes and triggers data sync
@@ -217,9 +219,15 @@ import (
 
 func main() {
     // Create first node - only 2 fields required!
-    ck, err := clusterkit.NewClusterKit(clusterkit.Options{
+    ck, err := clusterkit.New(clusterkit.Options{
         NodeID:   "node-1",
         HTTPAddr: ":8080",
+        // Optional: Register application services
+        Services: map[string]string{
+            "kv":   ":9080",     // Your KV store API
+            "api":  ":3000",     // Your REST API
+            "grpc": ":50051",    // Your gRPC service
+        },
         // Optional: Enable health checking
         HealthCheck: clusterkit.HealthCheckConfig{
             Enabled:          true,
@@ -246,7 +254,7 @@ func main() {
 ### Additional Nodes (Join Cluster)
 
 ```go
-ck, err := clusterkit.NewClusterKit(clusterkit.Options{
+ck, err := clusterkit.New(clusterkit.Options{
     NodeID:   "node-2",
     HTTPAddr: ":8081",
     JoinAddr: "localhost:8080", // Bootstrap node address
@@ -303,6 +311,82 @@ metrics := ck.GetMetrics() *Metrics
 // Health check
 health := ck.HealthCheck() *HealthStatus
 ```
+
+---
+
+## 🔍 Service Discovery
+
+ClusterKit includes built-in service discovery to help smart clients find your application services across the cluster.
+
+### Server Registration
+
+```go
+// Register multiple services per node
+ck, err := clusterkit.New(clusterkit.Options{
+    NodeID:   "node-1",
+    HTTPAddr: ":8080",  // ClusterKit coordination API
+    Services: map[string]string{
+        "kv":        ":9080",     // Key-Value store
+        "api":       ":3000",     // REST API
+        "grpc":      ":50051",    // gRPC service
+        "websocket": ":8081",     // WebSocket server
+        "metrics":   ":9090",     // Prometheus metrics
+    },
+})
+```
+
+### Smart Client Discovery
+
+```go
+// Get cluster topology with services
+resp, err := http.Get("http://localhost:8080/cluster")
+var cluster ClusterResponse
+json.NewDecoder(resp.Body).Decode(&cluster)
+
+// Route requests to appropriate services
+for _, node := range cluster.Cluster.Nodes {
+    kvAddr := node.Services["kv"]      // ":9080"
+    apiAddr := node.Services["api"]    // ":3000"
+    grpcAddr := node.Services["grpc"]  // ":50051"
+    
+    // Route different request types to different services
+    routeKVRequest(node.ID, "localhost"+kvAddr)
+    routeAPIRequest(node.ID, "localhost"+apiAddr)
+    routeGRPCRequest(node.ID, "localhost"+grpcAddr)
+}
+```
+
+### API Response Format
+
+The `/cluster` endpoint returns service information for each node:
+
+```json
+{
+  "cluster": {
+    "nodes": [
+      {
+        "id": "node-1",
+        "ip": ":8080",
+        "name": "Server-1",
+        "status": "active",
+        "services": {
+          "kv": ":9080",
+          "api": ":3000",
+          "grpc": ":50051"
+        }
+      }
+    ]
+  }
+}
+```
+
+### Benefits
+
+- **🎯 No hardcoded ports** - Services are explicitly registered and discoverable
+- **🔧 Multi-service nodes** - Support HTTP, gRPC, WebSocket, etc. on same node
+- **📡 Dynamic discovery** - Clients automatically find services as nodes join/leave
+- **⚖️ Load balancing** - Route different request types to different services
+- **🚀 Zero configuration** - Services field is optional and backward compatible
 
 ---
 
@@ -817,7 +901,7 @@ func (kv *KVStore) Get(key string) (string, error) {
 }
 
 func main() {
-    ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
+    ck, _ := clusterkit.New(clusterkit.Options{
         NodeID:   "node-1",
         HTTPAddr: ":8080",
         HealthCheck: clusterkit.HealthCheckConfig{
@@ -848,7 +932,7 @@ func main() {
 ### Minimal (2 required fields)
 
 ```go
-ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
+ck, _ := clusterkit.New(clusterkit.Options{
     NodeID:   "node-1",  // Required
     HTTPAddr: ":8080",   // Required
 })
@@ -857,7 +941,7 @@ ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
 ### Production Configuration
 
 ```go
-ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
+ck, _ := clusterkit.New(clusterkit.Options{
     // Required
     NodeID:   "node-1",
     HTTPAddr: ":8080",
@@ -890,7 +974,7 @@ ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
 ClusterKit exposes RESTful endpoints:
 
 ```bash
-# Get cluster state
+# Get cluster state (includes service discovery)
 curl http://localhost:8080/cluster
 
 # Get metrics
@@ -902,6 +986,12 @@ curl http://localhost:8080/health/detailed
 # Check if ready
 curl http://localhost:8080/ready
 ```
+
+The `/cluster` endpoint returns comprehensive cluster information including:
+- Node membership and status
+- **Service discovery** - All registered services per node
+- Partition assignments and replica locations
+- Cluster configuration and hash settings
 
 ---
 

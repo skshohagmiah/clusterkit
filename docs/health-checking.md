@@ -50,7 +50,7 @@ T25: Cluster stable with 2 nodes
 ### Default Configuration
 
 ```go
-ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
+ck, _ := clusterkit.New(clusterkit.Options{
     NodeID:   "node-1",
     HTTPAddr: ":8080",
     // Health checking enabled by default
@@ -60,7 +60,7 @@ ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
 ### Custom Configuration
 
 ```go
-ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
+ck, _ := clusterkit.New(clusterkit.Options{
     NodeID:   "node-1",
     HTTPAddr: ":8080",
     HealthCheck: clusterkit.HealthCheckConfig{
@@ -75,7 +75,7 @@ ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
 ### Disable Health Checking
 
 ```go
-ck, _ := clusterkit.NewClusterKit(clusterkit.Options{
+ck, _ := clusterkit.New(clusterkit.Options{
     NodeID:   "node-1",
     HTTPAddr: ":8080",
     HealthCheck: clusterkit.HealthCheckConfig{
@@ -401,7 +401,7 @@ if !ck.HasQuorum() {
 
 ```go
 func main() {
-    ck, _ := clusterkit.NewClusterKit(options)
+    ck, _ := clusterkit.New(options)
     ck.Start()
     
     // Handle shutdown signals
