@@ -30,12 +30,13 @@ type PartitionMap struct {
 
 // Cluster represents the entire distributed cluster
 type Cluster struct {
-	ID           string           `json:"id"`
-	Name         string           `json:"name"`
-	Nodes        []Node           `json:"nodes"`
-	NodeMap      map[string]*Node `json:"-"` // O(1) node lookup by ID
-	PartitionMap *PartitionMap    `json:"partition_map"`
-	Config       *Config          `json:"config"`
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Nodes        []Node            `json:"nodes"`
+	NodeMap      map[string]*Node  `json:"-"` // O(1) node lookup by ID
+	PartitionMap *PartitionMap     `json:"partition_map"`
+	Config       *Config           `json:"config"`
+	CustomData   map[string][]byte `json:"custom_data,omitempty"` // Application-specific data replicated via Raft
 }
 
 // Config holds cluster configuration

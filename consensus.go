@@ -1,6 +1,7 @@
 package clusterkit
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -70,6 +71,10 @@ func (f *clusterFSM) Apply(log *raft.Log) interface{} {
 		return f.applyRebalancePartitions(cmd["data"])
 	case "update_partition":
 		return f.applyUpdatePartition(cmd["data"])
+	case "set_custom_data":
+		return f.applySetCustomData(cmd["data"])
+	case "delete_custom_data":
+		return f.applyDeleteCustomData(cmd["data"])
 	default:
 		return fmt.Errorf("unknown operation: %s", operation)
 	}
@@ -403,6 +408,60 @@ func (f *clusterFSM) applyUpdatePartition(data interface{}) error {
 	return nil
 }
 
+// applySetCustomData stores custom data in the cluster state
+func (f *clusterFSM) applySetCustomData(data interface{}) error {
+	customData, ok := data.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("invalid custom data")
+	}
+
+	key, ok := customData["key"].(string)
+	if !ok || key == "" {
+		return fmt.Errorf("invalid or missing key")
+	}
+
+	value, ok := customData["value"].(string)
+	if !ok {
+		return fmt.Errorf("invalid value")
+	}
+
+	// Decode base64 value to []byte
+	valueBytes, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return fmt.Errorf("failed to decode value: %v", err)
+	}
+
+	f.ck.mu.Lock()
+	defer f.ck.mu.Unlock()
+
+	if f.ck.cluster.CustomData == nil {
+		f.ck.cluster.CustomData = make(map[string][]byte)
+	}
+
+	f.ck.cluster.CustomData[key] = valueBytes
+	fmt.Printf("✓ Set custom data: %s (%d bytes)\n", key, len(valueBytes))
+
+	return nil
+}
+
+// applyDeleteCustomData removes custom data from the cluster state
+func (f *clusterFSM) applyDeleteCustomData(data interface{}) error {
+	key, ok := data.(string)
+	if !ok || key == "" {
+		return fmt.Errorf("invalid or missing key")
+	}
+
+	f.ck.mu.Lock()
+	defer f.ck.mu.Unlock()
+
+	if f.ck.cluster.CustomData != nil {
+		delete(f.ck.cluster.CustomData, key)
+		fmt.Printf("✓ Deleted custom data: %s\n", key)
+	}
+
+	return nil
+}
+
 // Snapshot returns a snapshot of the FSM state
 func (f *clusterFSM) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.Lock()
@@ -429,6 +488,17 @@ func (f *clusterFSM) Snapshot() (raft.FSMSnapshot, error) {
 			clusterCopy.PartitionMap.Partitions[k] = partCopy
 		}
 	}
+
+	// Deep copy custom data
+	if f.ck.cluster.CustomData != nil {
+		clusterCopy.CustomData = make(map[string][]byte)
+		for k, v := range f.ck.cluster.CustomData {
+			valueCopy := make([]byte, len(v))
+			copy(valueCopy, v)
+			clusterCopy.CustomData[k] = valueCopy
+		}
+	}
+
 	f.ck.mu.RUnlock()
 
 	return &clusterSnapshot{

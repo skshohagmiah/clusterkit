@@ -2,6 +2,7 @@ package clusterkit
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -527,4 +528,77 @@ func calculateRaftAddr(httpAddr string) string {
 
 	// Default to 10001
 	return "127.0.0.1:10001"
+}
+
+// SetCustomData stores custom data that will be replicated across all nodes via Raft consensus
+// The data is stored as raw bytes, allowing any serialization format (JSON, protobuf, msgpack, etc.)
+// This operation goes through Raft consensus and will fail if this node is not the leader
+// Maximum value size is 1MB to prevent excessive memory usage
+func (ck *ClusterKit) SetCustomData(key string, value []byte) error {
+	if key == "" {
+		return fmt.Errorf("key cannot be empty")
+	}
+
+	if len(value) > 1024*1024 { // 1MB limit
+		return fmt.Errorf("value too large (max 1MB, got %d bytes)", len(value))
+	}
+
+	// Encode value as base64 for JSON serialization
+	valueEncoded := base64.StdEncoding.EncodeToString(value)
+
+	return ck.consensusManager.ProposeAction("set_custom_data", map[string]interface{}{
+		"key":   key,
+		"value": valueEncoded,
+	})
+}
+
+// GetCustomData retrieves custom data from the local cluster state
+// This is a local read operation and does not require consensus
+// Returns an error if the key is not found
+func (ck *ClusterKit) GetCustomData(key string) ([]byte, error) {
+	ck.mu.RLock()
+	defer ck.mu.RUnlock()
+
+	if ck.cluster.CustomData == nil {
+		return nil, fmt.Errorf("key not found: %s", key)
+	}
+
+	value, exists := ck.cluster.CustomData[key]
+	if !exists {
+		return nil, fmt.Errorf("key not found: %s", key)
+	}
+
+	// Return a copy to prevent external modification
+	valueCopy := make([]byte, len(value))
+	copy(valueCopy, value)
+
+	return valueCopy, nil
+}
+
+// DeleteCustomData removes custom data from all nodes via Raft consensus
+// This operation goes through Raft consensus and will fail if this node is not the leader
+func (ck *ClusterKit) DeleteCustomData(key string) error {
+	if key == "" {
+		return fmt.Errorf("key cannot be empty")
+	}
+
+	return ck.consensusManager.ProposeAction("delete_custom_data", key)
+}
+
+// ListCustomDataKeys returns all custom data keys currently stored in the cluster
+// This is a local read operation and does not require consensus
+func (ck *ClusterKit) ListCustomDataKeys() []string {
+	ck.mu.RLock()
+	defer ck.mu.RUnlock()
+
+	if ck.cluster.CustomData == nil {
+		return []string{}
+	}
+
+	keys := make([]string, 0, len(ck.cluster.CustomData))
+	for k := range ck.cluster.CustomData {
+		keys = append(keys, k)
+	}
+
+	return keys
 }

@@ -40,26 +40,76 @@ func NewDefaultLogger(level LogLevel) *DefaultLogger {
 
 func (l *DefaultLogger) Info(msg string, args ...interface{}) {
 	if l.level <= LogLevelInfo {
-		l.logger.Printf("[INFO] "+msg, args...)
+		if len(args) > 0 {
+			l.logger.Printf("[INFO] %s %s", msg, formatKeyValues(args...))
+		} else {
+			l.logger.Printf("[INFO] %s", msg)
+		}
 	}
 }
 
 func (l *DefaultLogger) Warn(msg string, args ...interface{}) {
 	if l.level <= LogLevelWarn {
-		l.logger.Printf("[WARN] "+msg, args...)
+		if len(args) > 0 {
+			l.logger.Printf("[WARN] %s %s", msg, formatKeyValues(args...))
+		} else {
+			l.logger.Printf("[WARN] %s", msg)
+		}
 	}
 }
 
 func (l *DefaultLogger) Error(msg string, args ...interface{}) {
 	if l.level <= LogLevelError {
-		l.logger.Printf("[ERROR] "+msg, args...)
+		if len(args) > 0 {
+			l.logger.Printf("[ERROR] %s %s", msg, formatKeyValues(args...))
+		} else {
+			l.logger.Printf("[ERROR] %s", msg)
+		}
 	}
 }
 
 func (l *DefaultLogger) Debug(msg string, args ...interface{}) {
 	if l.level <= LogLevelDebug {
-		l.logger.Printf("[DEBUG] "+msg, args...)
+		if len(args) > 0 {
+			l.logger.Printf("[DEBUG] %s %s", msg, formatKeyValues(args...))
+		} else {
+			l.logger.Printf("[DEBUG] %s", msg)
+		}
 	}
+}
+
+// formatKeyValues formats key-value pairs for structured logging
+// Expects alternating key-value pairs: key1, value1, key2, value2, ...
+func formatKeyValues(args ...interface{}) string {
+	if len(args) == 0 {
+		return ""
+	}
+
+	// If odd number of args, last one is just appended
+	pairs := make([]string, 0, (len(args)+1)/2)
+
+	for i := 0; i < len(args); i += 2 {
+		if i+1 < len(args) {
+			pairs = append(pairs, fmt.Sprintf("%v=%v", args[i], args[i+1]))
+		} else {
+			// Odd arg at the end
+			pairs = append(pairs, fmt.Sprintf("%v", args[i]))
+		}
+	}
+
+	return fmt.Sprintf("(%s)", joinStrings(pairs, ", "))
+}
+
+// joinStrings joins strings with a separator
+func joinStrings(strs []string, sep string) string {
+	if len(strs) == 0 {
+		return ""
+	}
+	result := strs[0]
+	for i := 1; i < len(strs); i++ {
+		result += sep + strs[i]
+	}
+	return result
 }
 
 // NoOpLogger is a logger that does nothing (for testing)
@@ -69,20 +119,3 @@ func (l *NoOpLogger) Info(msg string, args ...interface{})  {}
 func (l *NoOpLogger) Warn(msg string, args ...interface{})  {}
 func (l *NoOpLogger) Error(msg string, args ...interface{}) {}
 func (l *NoOpLogger) Debug(msg string, args ...interface{}) {}
-
-// Helper function for backward compatibility - logs to stdout
-func logInfo(msg string, args ...interface{}) {
-	fmt.Printf("[INFO] "+msg+"\n", args...)
-}
-
-func logWarn(msg string, args ...interface{}) {
-	fmt.Printf("[WARN] "+msg+"\n", args...)
-}
-
-func logError(msg string, args ...interface{}) {
-	fmt.Printf("[ERROR] "+msg+"\n", args...)
-}
-
-func logDebug(msg string, args ...interface{}) {
-	fmt.Printf("[DEBUG] "+msg+"\n", args...)
-}
