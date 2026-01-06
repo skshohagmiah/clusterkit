@@ -13,6 +13,9 @@ echo "  ✅ Custom data replication"
 echo "  ✅ Partition balancing"
 echo ""
 
+# Change to project root
+cd "$(dirname "$0")/.." || exit 1
+
 # Run integration tests
 echo "Running integration tests..."
 echo ""
